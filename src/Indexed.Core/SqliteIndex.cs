@@ -79,11 +79,36 @@ public sealed class SqliteIndex : IAsyncDisposable
             Directory.CreateDirectory(dir);
 
         var needsCreate = !File.Exists(dbPath);
-        var writer = OpenWriter(dbPath);
+        SqliteConnection writer;
+        try
+        {
+            writer = OpenWriter(dbPath);
+        }
+        catch (SqliteException)
+        {
+            // Corrupted DB file (not a valid SQLite database). Delete and
+            // recreate from scratch — the index is a derived artifact.
+            DeleteDbFiles(dbPath);
+            needsCreate = true;
+            writer = OpenWriter(dbPath);
+        }
 
         try
         {
-            ApplyConnectionPragmas(writer);
+            try
+            {
+                ApplyConnectionPragmas(writer);
+            }
+            catch (SqliteException)
+            {
+                // Corrupt DB passes Open (SQLite opens lazily) but fails on
+                // first PRAGMA. Delete, recreate.
+                writer.Dispose();
+                DeleteDbFiles(dbPath);
+                needsCreate = true;
+                writer = OpenWriter(dbPath);
+                ApplyConnectionPragmas(writer);
+            }
 
             if (!needsCreate && !SchemaMatches(writer, out _))
             {
@@ -202,7 +227,15 @@ public sealed class SqliteIndex : IAsyncDisposable
         }
 
         var conn = OpenReader(_dbPath);
-        ApplyConnectionPragmas(conn);
+        try
+        {
+            ApplyConnectionPragmas(conn);
+        }
+        catch
+        {
+            conn.Dispose();
+            throw;
+        }
         return new ReaderLease(this, conn);
     }
 
@@ -489,6 +522,17 @@ public sealed class SqliteIndex : IAsyncDisposable
     {
         if (_disposed) return;
         _disposed = true;
+
+        // WAL checkpoint: flush the WAL to the main DB file before closing.
+        // This bounds the -wal file size across daemon restarts and gives
+        // the next open a clean start.
+        try
+        {
+            using var cmd = _writer.CreateCommand();
+            cmd.CommandText = "PRAGMA wal_checkpoint(TRUNCATE);";
+            cmd.ExecuteNonQuery();
+        }
+        catch { /* best-effort — the index is a derived artifact */ }
 
         try { await _writer.DisposeAsync().ConfigureAwait(false); } catch { }
 

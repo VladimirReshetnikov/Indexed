@@ -2,7 +2,6 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Security.Cryptography;
-using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Indexed.Git;
@@ -144,6 +143,8 @@ public sealed class FullScanIndexer
                     if (info.Length > MaxIndexableFileBytes) { stats.Skipped++; continue; }
                     mtimeUtc = new DateTimeOffset(info.LastWriteTimeUtc, TimeSpan.Zero).ToUnixTimeSeconds();
                     bytes = await File.ReadAllBytesAsync(full, cancellationToken).ConfigureAwait(false);
+                    // Re-check after read: the file may have grown between stat and read.
+                    if (bytes.LongLength > MaxIndexableFileBytes) { stats.Skipped++; continue; }
                 }
                 catch (IOException ex)
                 {
@@ -167,7 +168,7 @@ public sealed class FullScanIndexer
                     continue;
                 }
 
-                var content = DecodeAsText(bytes);
+                var content = TextDecoder.Decode(bytes);
                 var language = LanguageGuess.FromPath(relPath);
 
                 SqliteIndex.UpsertFile(
@@ -194,14 +195,20 @@ public sealed class FullScanIndexer
                 }
             }
 
-            _index.SetMeta(SqliteSchema.MetaKey_IndexedHead, SafeHead());
-            _index.SetMeta(
-                SqliteSchema.MetaKey_LastFullScanAt,
-                DateTimeOffset.UtcNow.ToUnixTimeSeconds().ToString(System.Globalization.CultureInfo.InvariantCulture));
         }
         finally
         {
             await scope.DisposeAsync().ConfigureAwait(false);
+        }
+
+        // Write meta outside the file-upsert batches but inside a dedicated
+        // writer scope so the write is serialized properly.
+        await using (var metaScope = await _index.BeginWriteAsync(cancellationToken).ConfigureAwait(false))
+        {
+            _index.SetMeta(SqliteSchema.MetaKey_IndexedHead, SafeHead());
+            _index.SetMeta(
+                SqliteSchema.MetaKey_LastFullScanAt,
+                DateTimeOffset.UtcNow.ToUnixTimeSeconds().ToString(System.Globalization.CultureInfo.InvariantCulture));
         }
 
         stats.Elapsed = DateTimeOffset.UtcNow - started;
@@ -220,15 +227,6 @@ public sealed class FullScanIndexer
         return a.SequenceEqual(b);
     }
 
-    private static string DecodeAsText(ReadOnlySpan<byte> bytes)
-    {
-        // Strip a UTF-8 BOM if present; otherwise assume UTF-8. FTS5 stores
-        // TEXT; invalid byte sequences are replaced with U+FFFD so matching is
-        // defined even on subtly-broken source files.
-        if (bytes.Length >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF)
-            bytes = bytes.Slice(3);
-        return Encoding.UTF8.GetString(bytes);
-    }
 }
 
 /// <summary>Aggregate counts returned by <see cref="FullScanIndexer.RunAsync"/>.</summary>

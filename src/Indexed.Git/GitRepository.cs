@@ -419,7 +419,11 @@ public sealed class GitRepository
                 else
                     indexPath = Path.Combine(gitDir, "index");
             }
-            catch
+            catch (IOException)
+            {
+                return null;
+            }
+            catch (UnauthorizedAccessException)
             {
                 return null;
             }
@@ -435,7 +439,11 @@ public sealed class GitRepository
             if (!info.Exists) return null;
             return new DateTimeOffset(info.LastWriteTimeUtc, TimeSpan.Zero);
         }
-        catch
+        catch (IOException)
+        {
+            return null;
+        }
+        catch (UnauthorizedAccessException)
         {
             return null;
         }

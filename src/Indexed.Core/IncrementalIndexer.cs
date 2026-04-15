@@ -2,7 +2,6 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Security.Cryptography;
-using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
@@ -48,6 +47,12 @@ public sealed class IncrementalIndexer : IAsyncDisposable
 
     /// <summary>Maximum file size for indexing (same as FullScanIndexer).</summary>
     private const long MaxIndexableFileBytes = 50L * 1024 * 1024;
+
+    /// <summary>
+    /// <c>true</c> after the worker loop exits due to an unhandled exception.
+    /// Read by <c>DaemonHost.BuildStatus</c> to surface a degraded state.
+    /// </summary>
+    public bool IsFaulted { get; private set; }
 
     /// <summary>
     /// Fires after each batch commit so DaemonHost can reset the idle timer.
@@ -133,7 +138,13 @@ public sealed class IncrementalIndexer : IAsyncDisposable
             }
         }
 
-        _logger.LogInformation("incremental indexer worker stopped");
+        if (ct.IsCancellationRequested)
+            _logger.LogInformation("incremental indexer worker stopped (shutdown)");
+        else
+        {
+            IsFaulted = true;
+            _logger.LogWarning("incremental indexer worker stopped unexpectedly");
+        }
     }
 
     private async Task ProcessBatchAsync(IReadOnlyList<IndexEvent> batch, CancellationToken ct)
@@ -173,16 +184,25 @@ public sealed class IncrementalIndexer : IAsyncDisposable
         if (deleteSet.Count > 0)
         {
             await using var scope = await _index.BeginWriteAsync(ct).ConfigureAwait(false);
-            var deletedIds = new List<long>();
-            foreach (var path in deleteSet)
+            try
             {
-                var id = _index.LookupFileIdByPath(path);
-                if (id.HasValue) deletedIds.Add(id.Value);
+                var deletedIds = new List<long>();
+                foreach (var path in deleteSet)
+                {
+                    var id = _index.LookupFileIdByPath(path);
+                    if (id.HasValue) deletedIds.Add(id.Value);
+                }
+                if (deletedIds.Count > 0)
+                {
+                    SqliteIndex.BulkDeleteFiles(scope, deletedIds);
+                    _logger.LogDebug("deleted {Count} files from index", deletedIds.Count);
+                }
             }
-            if (deletedIds.Count > 0)
+            catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                SqliteIndex.BulkDeleteFiles(scope, deletedIds);
-                _logger.LogDebug("deleted {Count} files from index", deletedIds.Count);
+                scope.Fail();
+                _logger.LogError(ex, "failed during delete batch — rolling back");
+                throw;
             }
         }
 
@@ -194,62 +214,92 @@ public sealed class IncrementalIndexer : IAsyncDisposable
         if (toUpsert.Count > 0)
         {
             await using var scope = await _index.BeginWriteAsync(ct).ConfigureAwait(false);
-            foreach (var relPath in toUpsert)
+            try
             {
-                ct.ThrowIfCancellationRequested();
-
-                if (IsExcluded(relPath) || IsBinary(relPath))
+                foreach (var relPath in toUpsert)
                 {
-                    skipped++;
-                    continue;
+                    ct.ThrowIfCancellationRequested();
+
+                    if (IsExcluded(relPath) || IsBinary(relPath))
+                    {
+                        skipped++;
+                        continue;
+                    }
+
+                    var full = Path.Combine(_repo.RepoRoot, relPath.Replace('/', Path.DirectorySeparatorChar));
+                    byte[] bytes;
+                    long mtimeUtc;
+                    try
+                    {
+                        var info = new FileInfo(full);
+                        if (!info.Exists) { skipped++; continue; }
+                        if (info.Length > MaxIndexableFileBytes) { skipped++; continue; }
+                        mtimeUtc = new DateTimeOffset(info.LastWriteTimeUtc, TimeSpan.Zero).ToUnixTimeSeconds();
+                        bytes = await File.ReadAllBytesAsync(full, ct).ConfigureAwait(false);
+                        // Re-check after read: the file may have grown between stat and read.
+                        if (bytes.LongLength > MaxIndexableFileBytes)
+                        {
+                            _logger.LogDebug("skip {Path}: grew past size cap after read ({Size} bytes)", relPath, bytes.LongLength);
+                            skipped++;
+                            continue;
+                        }
+                    }
+                    catch (IOException ex)
+                    {
+                        _logger.LogDebug(ex, "skip {Path}: {Message}", relPath, ex.Message);
+                        skipped++;
+                        continue;
+                    }
+                    catch (UnauthorizedAccessException ex)
+                    {
+                        _logger.LogDebug(ex, "skip {Path}: {Message}", relPath, ex.Message);
+                        skipped++;
+                        continue;
+                    }
+
+                    var sha = SHA256.HashData(bytes);
+                    var prior = _index.TryGetShaByPath(relPath);
+                    if (prior.Length == sha.Length && prior.AsSpan().SequenceEqual(sha))
+                    {
+                        unchanged++;
+                        continue;
+                    }
+
+                    var content = TextDecoder.Decode(bytes);
+                    var language = LanguageGuess.FromPath(relPath);
+
+                    SqliteIndex.UpsertFile(
+                        scope: scope,
+                        path: relPath,
+                        mtimeUtc: mtimeUtc,
+                        sizeBytes: bytes.LongLength,
+                        sha256: sha,
+                        language: language,
+                        indexedAt: DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
+                        content: content);
+
+                    upserted++;
                 }
-
-                var full = Path.Combine(_repo.RepoRoot, relPath.Replace('/', Path.DirectorySeparatorChar));
-                byte[] bytes;
-                long mtimeUtc;
-                try
-                {
-                    var info = new FileInfo(full);
-                    if (!info.Exists) { skipped++; continue; }
-                    if (info.Length > MaxIndexableFileBytes) { skipped++; continue; }
-                    mtimeUtc = new DateTimeOffset(info.LastWriteTimeUtc, TimeSpan.Zero).ToUnixTimeSeconds();
-                    bytes = await File.ReadAllBytesAsync(full, ct).ConfigureAwait(false);
-                }
-                catch (IOException) { skipped++; continue; }
-                catch (UnauthorizedAccessException) { skipped++; continue; }
-
-                var sha = SHA256.HashData(bytes);
-                var prior = _index.TryGetShaByPath(relPath);
-                if (prior.Length == sha.Length && prior.AsSpan().SequenceEqual(sha))
-                {
-                    unchanged++;
-                    continue;
-                }
-
-                var content = DecodeAsText(bytes);
-                var language = LanguageGuess.FromPath(relPath);
-
-                SqliteIndex.UpsertFile(
-                    scope: scope,
-                    path: relPath,
-                    mtimeUtc: mtimeUtc,
-                    sizeBytes: bytes.LongLength,
-                    sha256: sha,
-                    language: language,
-                    indexedAt: DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
-                    content: content);
-
-                upserted++;
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                scope.Fail();
+                _logger.LogError(ex, "failed during upsert batch — rolling back");
+                throw;
             }
         }
 
-        // Update indexed_head after HeadMoved events.
+        // Update indexed_head inside a dedicated writer scope so the write
+        // is properly serialized with other writer activity.
+        string? newHead = null;
         foreach (var evt in batch)
         {
-            if (evt is HeadMoved hm)
-            {
-                _index.SetMeta(SqliteSchema.MetaKey_IndexedHead, hm.NewHead);
-            }
+            if (evt is HeadMoved hm) newHead = hm.NewHead;
+        }
+        if (newHead is not null)
+        {
+            await using var metaScope = await _index.BeginWriteAsync(ct).ConfigureAwait(false);
+            _index.SetMeta(SqliteSchema.MetaKey_IndexedHead, newHead);
         }
 
         if (upserted > 0 || deleteSet.Count > 0)
@@ -368,13 +418,6 @@ public sealed class IncrementalIndexer : IAsyncDisposable
             if (rx.IsMatch(norm)) return true;
         }
         return false;
-    }
-
-    private static string DecodeAsText(ReadOnlySpan<byte> bytes)
-    {
-        if (bytes.Length >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF)
-            bytes = bytes.Slice(3);
-        return Encoding.UTF8.GetString(bytes);
     }
 
     private static IReadOnlyList<Regex> CompileExcludes(IReadOnlyList<string>? globs)

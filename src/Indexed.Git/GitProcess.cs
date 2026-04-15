@@ -30,6 +30,13 @@ namespace Indexed.Git;
 /// whose message carries the trimmed stderr text. Stderr is read concurrently
 /// with stdout to avoid deadlocking on pipe-full conditions.
 /// </para>
+/// <para>
+/// Retry: when git exits with a message containing <c>index.lock</c>
+/// (another git process holds the lock), the call is retried up to
+/// <see cref="MaxLockRetries"/> times with exponential back-off. This avoids
+/// transient failures when the daemon's git operations collide with IDE
+/// auto-fetch, interactive rebase, or user-initiated commits.
+/// </para>
 /// </remarks>
 internal static class GitProcess
 {
@@ -37,6 +44,26 @@ internal static class GitProcess
     /// Executable name resolved on <c>PATH</c>. Set to a full path for tests.
     /// </summary>
     internal static string Executable { get; set; } = "git";
+
+    /// <summary>Maximum number of retries on <c>index.lock</c> contention.</summary>
+    internal static int MaxLockRetries { get; set; } = 4;
+
+    /// <summary>
+    /// Maximum wall-clock time to wait for a git subprocess to exit.
+    /// Prevents the daemon from hanging indefinitely if git stalls.
+    /// </summary>
+    internal static TimeSpan ProcessTimeout { get; set; } = TimeSpan.FromSeconds(60);
+
+    /// <summary>
+    /// Environment variables that must be removed from the git subprocess to
+    /// prevent accidental inheritance (e.g., running inside a git hook).
+    /// </summary>
+    private static readonly string[] PoisonousEnvVars =
+    {
+        "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_CEILING_DIRECTORIES", "GIT_COMMON_DIR",
+    };
 
     /// <summary>
     /// Run <c>git</c> with the given arguments and return stdout as a UTF-8 string.
@@ -60,11 +87,37 @@ internal static class GitProcess
     /// Run <c>git</c> and return stdout as a raw byte array. Use for
     /// <c>-z</c>-terminated output that may contain non-UTF-8 path bytes.
     /// </summary>
+    /// <remarks>
+    /// Retries automatically on <c>index.lock</c> contention with
+    /// exponential back-off (100 ms, 200 ms, 400 ms, 800 ms).
+    /// </remarks>
     public static byte[] RunBytes(
         string workingDirectory,
         IReadOnlyList<string> arguments,
         byte[]? stdin = null,
         CancellationToken cancellationToken = default)
+    {
+        var attempts = 0;
+        while (true)
+        {
+            try
+            {
+                return RunBytesCore(workingDirectory, arguments, stdin, cancellationToken);
+            }
+            catch (GitProcessException ex) when (IsLockContention(ex) && attempts < MaxLockRetries)
+            {
+                attempts++;
+                var delay = TimeSpan.FromMilliseconds(100 * (1 << (attempts - 1)));
+                Thread.Sleep(delay);
+            }
+        }
+    }
+
+    private static byte[] RunBytesCore(
+        string workingDirectory,
+        IReadOnlyList<string> arguments,
+        byte[]? stdin,
+        CancellationToken cancellationToken)
     {
         var psi = new ProcessStartInfo(Executable)
         {
@@ -78,9 +131,17 @@ internal static class GitProcess
             StandardErrorEncoding = Encoding.UTF8,
         };
         foreach (var a in arguments) psi.ArgumentList.Add(a);
+
+        // Force stable UTF-8 English output.
         psi.Environment["LANG"] = "C.UTF-8";
         psi.Environment["LC_ALL"] = "C.UTF-8";
         psi.Environment["GIT_TERMINAL_PROMPT"] = "0";
+
+        // Remove environment variables that could misdirect the subprocess
+        // to a different repository (e.g., if the daemon is launched from
+        // inside a git hook or a worktree).
+        foreach (var name in PoisonousEnvVars)
+            psi.Environment.Remove(name);
 
         using var process = new Process { StartInfo = psi };
         try
@@ -111,7 +172,13 @@ internal static class GitProcess
 
         try
         {
-            process.WaitForExit();
+            // Bounded wait — do not block indefinitely if git hangs.
+            if (!process.WaitForExit((int)ProcessTimeout.TotalMilliseconds))
+            {
+                TryKill(process);
+                throw new GitProcessException(Executable, arguments, -1,
+                    $"git process did not exit within {ProcessTimeout.TotalSeconds}s — killed");
+            }
             stdoutTask.GetAwaiter().GetResult();
         }
         catch (OperationCanceledException)
@@ -125,6 +192,15 @@ internal static class GitProcess
             throw new GitProcessException(Executable, arguments, process.ExitCode, stderr.Trim());
 
         return stdoutBuffer.ToArray();
+    }
+
+    /// <summary>
+    /// Detect git exit caused by <c>.git/index.lock</c> held by another process.
+    /// </summary>
+    private static bool IsLockContention(GitProcessException ex)
+    {
+        return ex.Message.Contains("index.lock", StringComparison.OrdinalIgnoreCase)
+            || ex.Message.Contains("Unable to create", StringComparison.OrdinalIgnoreCase);
     }
 
     private static void TryKill(Process process)

@@ -60,7 +60,16 @@ public sealed class ReconciliationScheduler : IDisposable
 
     private void OnTick(object? state)
     {
-        _logger.LogDebug("ReconciliationScheduler tick — enqueuing reconciliation");
-        _queue.Enqueue(new ReconciliationRequested());
+        try
+        {
+            _logger.LogDebug("ReconciliationScheduler tick — enqueuing reconciliation");
+            _queue.Enqueue(new ReconciliationRequested());
+        }
+        catch (Exception ex)
+        {
+            // Guard against InvalidOperationException if the channel was
+            // completed before the scheduler was disposed (shutdown race).
+            _logger.LogDebug(ex, "ReconciliationScheduler tick failed (shutdown race?)");
+        }
     }
 }

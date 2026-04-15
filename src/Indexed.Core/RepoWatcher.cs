@@ -119,7 +119,11 @@ public sealed class RepoWatcher : IDisposable
 
     private void OnError(object sender, ErrorEventArgs e)
     {
-        _logger.LogWarning(e.GetException(), "FileSystemWatcher error — events may have been dropped");
+        _logger.LogWarning(e.GetException(), "FileSystemWatcher error — events may have been dropped; requesting reconciliation");
+        // Buffer overflow or access failure — events were silently dropped.
+        // Enqueue an immediate reconciliation so the 5-minute scheduler
+        // doesn't leave a blind spot.
+        _queue.Enqueue(new ReconciliationRequested());
     }
 
     /// <summary>

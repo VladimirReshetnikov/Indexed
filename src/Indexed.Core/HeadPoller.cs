@@ -33,6 +33,7 @@ public sealed class HeadPoller : IDisposable
     private Timer? _timer;
     private DateTimeOffset? _lastIndexMtime;
     private string? _lastKnownHead;
+    private int _consecutiveErrors;
 
     /// <summary>
     /// Create a poller.
@@ -117,10 +118,19 @@ public sealed class HeadPoller : IDisposable
 
             _queue.Enqueue(new HeadMoved(indexedHead ?? string.Empty, currentHead));
             _lastKnownHead = currentHead;
+
+            // Reset error counter on success.
+            _consecutiveErrors = 0;
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "HeadPoller tick error");
+            _consecutiveErrors++;
+            // Logarithmic backoff: log at Warning only every 2^N errors to
+            // avoid 1-per-second log spam when the error is persistent.
+            if (_consecutiveErrors <= 1 || (_consecutiveErrors & (_consecutiveErrors - 1)) == 0)
+            {
+                _logger.LogWarning(ex, "HeadPoller tick error (consecutive: {Count})", _consecutiveErrors);
+            }
         }
     }
 }

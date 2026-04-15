@@ -191,7 +191,15 @@ internal sealed class DaemonHost : IAsyncDisposable
             }
 
             _idleTimer?.Poke();
-            _ = Task.Run(() => HandleRequestSafelyAsync(context), ct);
+            try
+            {
+                _ = Task.Run(() => HandleRequestSafelyAsync(context), ct);
+            }
+            catch (ObjectDisposedException)
+            {
+                // CTS disposed during shutdown — ignore; the listener loop
+                // will exit on the next iteration.
+            }
         }
     }
 
@@ -427,11 +435,21 @@ internal sealed class DaemonHost : IAsyncDisposable
 #pragma warning disable CA1416 // Mutex name with "Global\" prefix is Windows-only; gated above.
         var name = $"Global\\Indexed-{_repoId}";
         _singletonMutex = new Mutex(initiallyOwned: false, name, out var createdNew);
-        if (!_singletonMutex.WaitOne(TimeSpan.Zero))
+        try
         {
-            _singletonMutex.Dispose();
-            _singletonMutex = null;
-            throw new DaemonAlreadyRunningException(_repoId!);
+            if (!_singletonMutex.WaitOne(TimeSpan.Zero))
+            {
+                _singletonMutex.Dispose();
+                _singletonMutex = null;
+                throw new DaemonAlreadyRunningException(_repoId!);
+            }
+        }
+        catch (AbandonedMutexException)
+        {
+            // Previous daemon crashed (taskkill /f, power loss) without
+            // releasing the mutex. WaitOne still acquired it — we now own
+            // it and can proceed.
+            _logger.LogWarning("acquired abandoned daemon mutex — previous instance likely crashed");
         }
         _ = createdNew; // suppress unused local warning
 #pragma warning restore CA1416

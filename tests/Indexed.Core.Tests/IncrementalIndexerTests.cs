@@ -161,7 +161,10 @@ public sealed class IncrementalIndexerTests : IDisposable
         indexer.Start();
 
         queue.Enqueue(new HeadMoved(sha1, sha2));
-        await Task.Delay(300);
+
+        // HeadMoved processing shells out to git diff-tree, then reads and
+        // upserts multiple files + writes indexed_head meta — allow time.
+        await Task.Delay(2000);
 
         await indexer.DisposeAsync();
 
