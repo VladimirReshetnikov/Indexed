@@ -1,0 +1,182 @@
+using System;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+using Indexed.Core;
+using Xunit;
+
+namespace Indexed.Core.Tests;
+
+/// <summary>
+/// Tests for <see cref="DebouncingEventQueue"/> — verifies per-path
+/// deduplication, global batch windowing, and event ordering.
+/// </summary>
+public sealed class DebouncingEventQueueTests
+{
+    [Fact]
+    public async Task SingleEvent_DrainedWithinBatchWindow()
+    {
+        using var queue = new DebouncingEventQueue(
+            perPathDebounce: TimeSpan.FromMilliseconds(10),
+            globalBatchWindow: TimeSpan.FromMilliseconds(50));
+
+        queue.Enqueue(new FileChanged("a.cs"));
+
+        var batch = await queue.DequeueAsync();
+
+        Assert.Single(batch);
+        Assert.IsType<FileChanged>(batch[0]);
+        Assert.Equal("a.cs", ((FileChanged)batch[0]).RelativePath);
+    }
+
+    [Fact]
+    public async Task RapidSamePathEvents_CollapsedToOne()
+    {
+        using var queue = new DebouncingEventQueue(
+            perPathDebounce: TimeSpan.FromMilliseconds(10),
+            globalBatchWindow: TimeSpan.FromMilliseconds(100));
+
+        // Rapid-fire 5 events for the same path.
+        for (var i = 0; i < 5; i++)
+            queue.Enqueue(new FileChanged("a.cs"));
+
+        var batch = await queue.DequeueAsync();
+
+        // Per-path debouncing collapses them into one.
+        var aEvents = batch.OfType<FileChanged>().Where(e => e.RelativePath == "a.cs").ToList();
+        Assert.Single(aEvents);
+    }
+
+    [Fact]
+    public async Task DifferentPaths_AllEmitted()
+    {
+        using var queue = new DebouncingEventQueue(
+            perPathDebounce: TimeSpan.FromMilliseconds(10),
+            globalBatchWindow: TimeSpan.FromMilliseconds(100));
+
+        queue.Enqueue(new FileChanged("a.cs"));
+        queue.Enqueue(new FileChanged("b.cs"));
+        queue.Enqueue(new FileChanged("c.cs"));
+
+        var batch = await queue.DequeueAsync();
+
+        Assert.Equal(3, batch.OfType<FileChanged>().Count());
+    }
+
+    [Fact]
+    public async Task HeadMoved_EmittedBeforeFileEvents()
+    {
+        using var queue = new DebouncingEventQueue(
+            perPathDebounce: TimeSpan.FromMilliseconds(10),
+            globalBatchWindow: TimeSpan.FromMilliseconds(100));
+
+        queue.Enqueue(new FileChanged("a.cs"));
+        queue.Enqueue(new HeadMoved("aaa", "bbb"));
+
+        var batch = await queue.DequeueAsync();
+
+        // HeadMoved should come first (global events before per-path).
+        Assert.IsType<HeadMoved>(batch[0]);
+    }
+
+    [Fact]
+    public async Task ReconciliationRequested_EmittedBeforeFileEvents()
+    {
+        using var queue = new DebouncingEventQueue(
+            perPathDebounce: TimeSpan.FromMilliseconds(10),
+            globalBatchWindow: TimeSpan.FromMilliseconds(100));
+
+        queue.Enqueue(new FileChanged("a.cs"));
+        queue.Enqueue(new ReconciliationRequested());
+
+        var batch = await queue.DequeueAsync();
+
+        Assert.IsType<ReconciliationRequested>(batch[0]);
+    }
+
+    [Fact]
+    public async Task FileDeleted_OverridesFileChanged_ForSamePath()
+    {
+        using var queue = new DebouncingEventQueue(
+            perPathDebounce: TimeSpan.FromMilliseconds(10),
+            globalBatchWindow: TimeSpan.FromMilliseconds(100));
+
+        queue.Enqueue(new FileChanged("a.cs"));
+        queue.Enqueue(new FileDeleted("a.cs"));
+
+        var batch = await queue.DequeueAsync();
+
+        // The last event for the path wins — should be FileDeleted.
+        var aEvent = batch.OfType<IndexEvent>()
+            .FirstOrDefault(e => e is FileChanged fc && fc.RelativePath == "a.cs"
+                             || e is FileDeleted fd && fd.RelativePath == "a.cs");
+        Assert.IsType<FileDeleted>(aEvent);
+    }
+
+    [Fact]
+    public async Task PendingCount_ReflectsQueueState()
+    {
+        using var queue = new DebouncingEventQueue(
+            perPathDebounce: TimeSpan.FromMilliseconds(10),
+            globalBatchWindow: TimeSpan.FromMilliseconds(50));
+
+        Assert.Equal(0, queue.PendingCount);
+
+        queue.Enqueue(new FileChanged("a.cs"));
+        queue.Enqueue(new FileChanged("b.cs"));
+
+        // PendingCount is incremented on Enqueue.
+        Assert.True(queue.PendingCount >= 1);
+
+        var batch = await queue.DequeueAsync();
+
+        // After dequeue, pending count should drop.
+        Assert.Equal(0, queue.PendingCount);
+    }
+
+    [Fact]
+    public async Task Complete_CausesDrainToReturnEmpty()
+    {
+        using var queue = new DebouncingEventQueue(
+            perPathDebounce: TimeSpan.FromMilliseconds(10),
+            globalBatchWindow: TimeSpan.FromMilliseconds(50));
+
+        queue.Complete();
+
+        var batch = await queue.DequeueAsync();
+
+        Assert.Empty(batch);
+    }
+
+    [Fact]
+    public async Task CancellationToken_Respected()
+    {
+        using var queue = new DebouncingEventQueue(
+            perPathDebounce: TimeSpan.FromMilliseconds(10),
+            globalBatchWindow: TimeSpan.FromMilliseconds(50));
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(100));
+
+        // No events enqueued — DequeueAsync blocks until cancelled.
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => queue.DequeueAsync(cts.Token).AsTask());
+    }
+
+    [Fact]
+    public async Task MaxBatchSize_CapsOutput()
+    {
+        using var queue = new DebouncingEventQueue(
+            perPathDebounce: TimeSpan.FromMilliseconds(10),
+            globalBatchWindow: TimeSpan.FromMilliseconds(100),
+            maxBatchSize: 3);
+
+        for (var i = 0; i < 10; i++)
+            queue.Enqueue(new FileChanged($"file{i}.cs"));
+
+        var batch = await queue.DequeueAsync();
+
+        // Should cap at maxBatchSize (3) for per-path events.
+        // Global events are separate but there are none here.
+        Assert.True(batch.Count <= 3, $"Expected <= 3 events, got {batch.Count}");
+    }
+}

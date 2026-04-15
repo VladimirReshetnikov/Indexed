@@ -60,6 +60,11 @@ internal sealed class DaemonHost : IAsyncDisposable
     private IdleExitTimer? _idleTimer;
     private DaemonInfo? _info;
     private IndexStatistics? _lastScan;
+    private DebouncingEventQueue? _eventQueue;
+    private IncrementalIndexer? _incrementalIndexer;
+    private RepoWatcher? _repoWatcher;
+    private HeadPoller? _headPoller;
+    private ReconciliationScheduler? _reconciliationScheduler;
 
     public DaemonHost(DaemonOptions options, ILogger<DaemonHost>? logger = null)
     {
@@ -116,6 +121,25 @@ internal sealed class DaemonHost : IAsyncDisposable
             }
 
             _backend = new SqliteSearchBackend(_index, BuildFreshness);
+
+            // Stage 4: start the incremental indexer pipeline.
+            _eventQueue = new DebouncingEventQueue();
+            _incrementalIndexer = new IncrementalIndexer(
+                _repo, _index, _eventQueue, _options.IndexExcludeGlobs, _logger);
+            _incrementalIndexer.BatchCommitted += () => _idleTimer?.Poke();
+            _incrementalIndexer.Start();
+
+            _repoWatcher = new RepoWatcher(
+                _repo.RepoRoot, _eventQueue, _options.IndexExcludeGlobs, _logger);
+            _repoWatcher.Start();
+
+            _headPoller = new HeadPoller(
+                _repo, _index, _eventQueue, interval: null, _logger);
+            _headPoller.Start();
+
+            _reconciliationScheduler = new ReconciliationScheduler(
+                _eventQueue, interval: null, _logger);
+            _reconciliationScheduler.Start();
         }
 
         _info = new DaemonInfo(
@@ -190,6 +214,18 @@ internal sealed class DaemonHost : IAsyncDisposable
         if (_paths is not null) DaemonInfo.TryDelete(_paths.DaemonJsonPath);
 
         _idleTimer?.Dispose();
+
+        // Stage 4: stop watcher/poller/scheduler first, then drain the
+        // incremental indexer worker, then close the index.
+        _repoWatcher?.Dispose();
+        _headPoller?.Dispose();
+        _reconciliationScheduler?.Dispose();
+
+        if (_incrementalIndexer is not null)
+        {
+            try { await _incrementalIndexer.DisposeAsync().ConfigureAwait(false); } catch { }
+        }
+        _eventQueue?.Dispose();
 
         if (_index is not null)
         {
@@ -298,20 +334,9 @@ internal sealed class DaemonHost : IAsyncDisposable
 
         if (method == "POST" && path == "/rescan")
         {
-            // Stage 2: rescan synchronously on the request thread. Stage 4
-            // moves this to a background queue with progress reporting.
-            if (_index is not null && _repo is not null)
-            {
-                try
-                {
-                    var indexer = new FullScanIndexer(_repo, _index, _options.IndexExcludeGlobs, _logger);
-                    _lastScan = await indexer.RunAsync(progress: null, _shutdownCts.Token).ConfigureAwait(false);
-                }
-                catch (OperationCanceledException)
-                {
-                    // shutdown requested mid-rescan — fall through to status reply
-                }
-            }
+            // Stage 4: enqueue a ReconciliationRequested event and return
+            // immediately. The incremental indexer processes it asynchronously.
+            _eventQueue?.Enqueue(new ReconciliationRequested());
             await WriteJsonAsync(
                 context.Response, 200, BuildStatus(), IndexedJsonContext.Default.StatusResponse)
                 .ConfigureAwait(false);
@@ -382,14 +407,16 @@ internal sealed class DaemonHost : IAsyncDisposable
         }
 
         var currentHead = string.IsNullOrEmpty(head) ? null : head;
+        var pendingCount = _eventQueue?.PendingCount ?? 0;
         var isStale = indexedHead is null
             || currentHead is null
-            || !string.Equals(indexedHead, currentHead, StringComparison.Ordinal);
+            || !string.Equals(indexedHead, currentHead, StringComparison.Ordinal)
+            || pendingCount > 0;
 
         return new Freshness(
             IndexedHead: indexedHead,
             CurrentHead: currentHead,
-            PendingFileCount: 0,
+            PendingFileCount: pendingCount,
             LastFullScanAt: lastFullScan,
             IsStale: isStale,
             Note: note);

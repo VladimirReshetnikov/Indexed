@@ -6,10 +6,37 @@ using System.Text;
 namespace Indexed.Git;
 
 /// <summary>
+/// Status code for a single entry in <c>git diff-tree</c> output.
+/// </summary>
+public enum DiffStatus
+{
+    /// <summary>File added in the target tree.</summary>
+    Added,
+    /// <summary>File modified between the two trees.</summary>
+    Modified,
+    /// <summary>File deleted from the target tree.</summary>
+    Deleted,
+    /// <summary>File renamed (old path → new path).</summary>
+    Renamed,
+    /// <summary>File copied (source retained, new path created).</summary>
+    Copied,
+}
+
+/// <summary>
+/// One entry from <c>git diff-tree -r --name-status -z</c>.
+/// </summary>
+/// <param name="Status">Kind of change.</param>
+/// <param name="Path">Repository-relative path (forward-slash separators) of the affected file.
+/// For renames/copies this is the <em>new</em> path.</param>
+/// <param name="OldPath">For <see cref="DiffStatus.Renamed"/> and <see cref="DiffStatus.Copied"/>,
+/// the original path. <c>null</c> for all other statuses.</param>
+public sealed record DiffTreeEntry(DiffStatus Status, string Path, string? OldPath);
+
+/// <summary>
 /// Thin adapter over <c>git.exe</c> that provides the exact set of repository
 /// queries Indexed needs: root discovery, HEAD/first-commit probing, the
 /// union enumeration (<c>ls-files</c> plus <c>--others --exclude-standard</c>),
-/// and binary-attribute interrogation.
+/// diff-tree between commits, and binary-attribute interrogation.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -267,6 +294,151 @@ public sealed class GitRepository
                 result.Add(fields[i]);
         }
         return result;
+    }
+
+    /// <summary>
+    /// Compute the tree diff between two commits and return a structured entry
+    /// per changed file.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Uses <c>git diff-tree -r --name-status --no-commit-id -z &lt;from&gt; &lt;to&gt;</c>.
+    /// The <c>-z</c> flag produces NUL-delimited output that handles paths with
+    /// spaces or special characters. Renames and copies include both old and new
+    /// paths.
+    /// </para>
+    /// <para>
+    /// Throws <see cref="GitProcessException"/> when either commit is unreachable
+    /// (pruned by GC, shallow clone boundary, etc.). Callers should catch and
+    /// fall back to a full rescan.
+    /// </para>
+    /// </remarks>
+    /// <param name="fromCommit">Base commit (40-hex SHA or any tree-ish).</param>
+    /// <param name="toCommit">Target commit.</param>
+    /// <returns>One entry per changed path. Empty when the trees are identical.</returns>
+    public IReadOnlyList<DiffTreeEntry> GetDiffTree(string fromCommit, string toCommit)
+    {
+        if (string.IsNullOrEmpty(fromCommit)) throw new ArgumentException("fromCommit is required", nameof(fromCommit));
+        if (string.IsNullOrEmpty(toCommit)) throw new ArgumentException("toCommit is required", nameof(toCommit));
+
+        var bytes = GitProcess.RunBytes(
+            RepoRoot,
+            new[] { "diff-tree", "-r", "--name-status", "--no-commit-id", "-z", fromCommit, toCommit });
+
+        var fields = SplitNullTerminated(bytes);
+        var result = new List<DiffTreeEntry>();
+
+        for (var i = 0; i < fields.Count;)
+        {
+            var statusField = fields[i];
+            if (statusField.Length == 0) { i++; continue; }
+
+            var statusChar = statusField[0];
+            switch (statusChar)
+            {
+                case 'A':
+                    if (i + 1 >= fields.Count) goto done;
+                    result.Add(new DiffTreeEntry(DiffStatus.Added, fields[i + 1], null));
+                    i += 2;
+                    break;
+
+                case 'M':
+                case 'T': // type change — treat as modification
+                    if (i + 1 >= fields.Count) goto done;
+                    result.Add(new DiffTreeEntry(DiffStatus.Modified, fields[i + 1], null));
+                    i += 2;
+                    break;
+
+                case 'D':
+                    if (i + 1 >= fields.Count) goto done;
+                    result.Add(new DiffTreeEntry(DiffStatus.Deleted, fields[i + 1], null));
+                    i += 2;
+                    break;
+
+                case 'R': // R100, R095, etc. — old path then new path
+                    if (i + 2 >= fields.Count) goto done;
+                    result.Add(new DiffTreeEntry(DiffStatus.Renamed, fields[i + 2], fields[i + 1]));
+                    i += 3;
+                    break;
+
+                case 'C': // C100, C095, etc. — source path then new path
+                    if (i + 2 >= fields.Count) goto done;
+                    result.Add(new DiffTreeEntry(DiffStatus.Copied, fields[i + 2], fields[i + 1]));
+                    i += 3;
+                    break;
+
+                default:
+                    // Unknown status letter (U for unmerged, X for unknown, etc.) — skip.
+                    i++;
+                    break;
+            }
+        }
+
+        done:
+        return result;
+    }
+
+    /// <summary>
+    /// List all untracked, non-ignored files in the working tree.
+    /// </summary>
+    /// <remarks>
+    /// Uses <c>git ls-files --others --exclude-standard -z</c>. This is the
+    /// same set already included in <see cref="EnumerateFiles"/>, exposed
+    /// separately for the incremental reconciliation pass which needs to diff
+    /// the untracked set against the index without re-enumerating tracked files.
+    /// </remarks>
+    public IReadOnlyList<string> GetUntrackedFiles()
+    {
+        return RunLsFilesZ(new[] { "ls-files", "-z", "--others", "--exclude-standard" });
+    }
+
+    /// <summary>
+    /// Return the last-write time of <c>.git/index</c> as a cheap canary for
+    /// whether any git operation has mutated the staging area or HEAD since
+    /// the last check.
+    /// </summary>
+    /// <remarks>
+    /// Returns <c>null</c> when the file does not exist (bare repo, unborn
+    /// branch). The HeadPoller uses this to avoid spawning <c>git rev-parse
+    /// HEAD</c> on every tick when nothing has changed.
+    /// </remarks>
+    public DateTimeOffset? GetIndexMtime()
+    {
+        // .git may be a file (gitdir pointer for worktrees/submodules); find
+        // the actual git directory.
+        var gitDir = Path.Combine(RepoRoot, ".git");
+        string indexPath;
+        if (File.Exists(gitDir))
+        {
+            // gitdir: <path> format — read the target
+            try
+            {
+                var content = File.ReadAllText(gitDir).Trim();
+                if (content.StartsWith("gitdir:", StringComparison.Ordinal))
+                    indexPath = Path.Combine(RepoRoot, content.Substring("gitdir:".Length).Trim(), "index");
+                else
+                    indexPath = Path.Combine(gitDir, "index");
+            }
+            catch
+            {
+                return null;
+            }
+        }
+        else
+        {
+            indexPath = Path.Combine(gitDir, "index");
+        }
+
+        try
+        {
+            var info = new FileInfo(indexPath);
+            if (!info.Exists) return null;
+            return new DateTimeOffset(info.LastWriteTimeUtc, TimeSpan.Zero);
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     private List<string> RunLsFilesZ(string[] args)

@@ -117,6 +117,67 @@ public sealed class SqliteIndexTests : IDisposable
         var candidates = await index.QueryCodeCandidatesAsync("\"zet\"", default);
         Assert.Empty(candidates);
     }
+    [Fact]
+    public async Task GetAllPathsWithSha_ReturnsEveryRow()
+    {
+        await using var index = SqliteIndex.OpenOrCreate(DbPath);
+        var sha1 = new byte[32]; sha1[0] = 1;
+        var sha2 = new byte[32]; sha2[0] = 2;
+
+        await using (var scope = await index.BeginWriteAsync())
+        {
+            SqliteIndex.UpsertFile(scope, "a.cs", 1, 10, sha1, "csharp", 1, "alpha");
+            SqliteIndex.UpsertFile(scope, "b.cs", 1, 10, sha2, "csharp", 1, "beta");
+        }
+
+        var all = await index.GetAllPathsWithShaAsync(default);
+
+        Assert.Equal(2, all.Count);
+        Assert.True(all.ContainsKey("a.cs"));
+        Assert.True(all.ContainsKey("b.cs"));
+        Assert.Equal(sha1, all["a.cs"]);
+        Assert.Equal(sha2, all["b.cs"]);
+    }
+
+    [Fact]
+    public async Task LookupFileIdByPath_ReturnsIdOrNull()
+    {
+        await using var index = SqliteIndex.OpenOrCreate(DbPath);
+
+        await using (var scope = await index.BeginWriteAsync())
+        {
+            SqliteIndex.UpsertFile(scope, "found.cs", 1, 1, new byte[32], "csharp", 1, "x");
+        }
+
+        var found = index.LookupFileIdByPath("found.cs");
+        Assert.NotNull(found);
+
+        var missing = index.LookupFileIdByPath("missing.cs");
+        Assert.Null(missing);
+    }
+
+    [Fact]
+    public async Task BulkDeleteFiles_RemovesAll()
+    {
+        await using var index = SqliteIndex.OpenOrCreate(DbPath);
+
+        long id1, id2;
+        await using (var scope = await index.BeginWriteAsync())
+        {
+            id1 = SqliteIndex.UpsertFile(scope, "x.cs", 1, 1, new byte[32], "csharp", 1, "aaa");
+            var sha2 = new byte[32]; sha2[0] = 1;
+            id2 = SqliteIndex.UpsertFile(scope, "y.cs", 1, 1, sha2, "csharp", 1, "bbb");
+        }
+
+        Assert.Equal(2L, index.GetFileCount());
+
+        await using (var scope = await index.BeginWriteAsync())
+        {
+            SqliteIndex.BulkDeleteFiles(scope, new[] { id1, id2 });
+        }
+
+        Assert.Equal(0L, index.GetFileCount());
+    }
 }
 
 /// <summary>Helper to keep the sync test readable despite the async-disposable API.</summary>

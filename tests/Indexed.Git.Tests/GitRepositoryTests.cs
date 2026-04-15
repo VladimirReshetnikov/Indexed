@@ -297,6 +297,149 @@ public sealed class GitRepositoryTests : IDisposable
         Assert.Empty(handle.GetBinaryAttrPaths());
     }
 
+    // ----- GetDiffTree -----
+
+    [Fact]
+    public void GetDiffTree_DetectsAddedModifiedDeleted()
+    {
+        var repo = NewRepo("diff-amd");
+        WriteText(repo, "keep.cs", "original");
+        WriteText(repo, "modify.cs", "v1");
+        WriteText(repo, "remove.cs", "bye");
+        Run(repo, "add", "-A");
+        Run(repo, "commit", "-q", "-m", "c1");
+        var sha1 = GitProcess.RunText(repo, new[] { "rev-parse", "HEAD" }).Trim();
+
+        // Modify, delete, and add a file.
+        WriteText(repo, "modify.cs", "v2");
+        File.Delete(Path.Combine(repo, "remove.cs"));
+        WriteText(repo, "added.cs", "new file");
+        Run(repo, "add", "-A");
+        Run(repo, "commit", "-q", "-m", "c2");
+        var sha2 = GitProcess.RunText(repo, new[] { "rev-parse", "HEAD" }).Trim();
+
+        var handle = GitRepository.Open(repo);
+        var diff = handle.GetDiffTree(sha1, sha2);
+
+        Assert.Contains(diff, e => e.Status == DiffStatus.Added && e.Path == "added.cs");
+        Assert.Contains(diff, e => e.Status == DiffStatus.Modified && e.Path == "modify.cs");
+        Assert.Contains(diff, e => e.Status == DiffStatus.Deleted && e.Path == "remove.cs");
+        // "keep.cs" should not appear.
+        Assert.DoesNotContain(diff, e => e.Path == "keep.cs");
+    }
+
+    [Fact]
+    public void GetDiffTree_DetectsRenames()
+    {
+        var repo = NewRepo("diff-rename");
+        WriteText(repo, "old-name.cs", "some unique content for rename detection");
+        Run(repo, "add", "-A");
+        Run(repo, "commit", "-q", "-m", "c1");
+        var sha1 = GitProcess.RunText(repo, new[] { "rev-parse", "HEAD" }).Trim();
+
+        Run(repo, "mv", "old-name.cs", "new-name.cs");
+        Run(repo, "commit", "-q", "-m", "c2");
+        var sha2 = GitProcess.RunText(repo, new[] { "rev-parse", "HEAD" }).Trim();
+
+        var handle = GitRepository.Open(repo);
+        var diff = handle.GetDiffTree(sha1, sha2);
+
+        // Git may report this as Renamed or as Add+Delete depending on
+        // diff-tree heuristics. Either way the new path must appear.
+        var hasNew = diff.Any(e => e.Path == "new-name.cs");
+        Assert.True(hasNew, "new-name.cs should appear in diff");
+    }
+
+    [Fact]
+    public void GetDiffTree_IdenticalTrees_ReturnsEmpty()
+    {
+        var repo = NewRepo("diff-same");
+        WriteText(repo, "a.txt", "x");
+        Run(repo, "add", "-A");
+        Run(repo, "commit", "-q", "-m", "c1");
+        var sha = GitProcess.RunText(repo, new[] { "rev-parse", "HEAD" }).Trim();
+
+        var handle = GitRepository.Open(repo);
+        var diff = handle.GetDiffTree(sha, sha);
+
+        Assert.Empty(diff);
+    }
+
+    [Fact]
+    public void GetDiffTree_ThrowsForUnreachableCommit()
+    {
+        var repo = NewRepo("diff-bad");
+        WriteText(repo, "a.txt", "x");
+        Run(repo, "add", "-A");
+        Run(repo, "commit", "-q", "-m", "c1");
+        var sha = GitProcess.RunText(repo, new[] { "rev-parse", "HEAD" }).Trim();
+
+        var handle = GitRepository.Open(repo);
+        Assert.Throws<GitProcessException>(
+            () => handle.GetDiffTree(sha, "0000000000000000000000000000000000000000"));
+    }
+
+    // ----- GetUntrackedFiles -----
+
+    [Fact]
+    public void GetUntrackedFiles_ListsNonIgnored()
+    {
+        var repo = NewRepo("untracked");
+        WriteText(repo, ".gitignore", "*.log\n");
+        Run(repo, "add", ".gitignore");
+        Run(repo, "commit", "-q", "-m", "init");
+
+        WriteText(repo, "untracked.cs", "x");
+        WriteText(repo, "debug.log", "ignored");
+
+        var handle = GitRepository.Open(repo);
+        var files = handle.GetUntrackedFiles();
+
+        Assert.Contains("untracked.cs", files);
+        Assert.DoesNotContain("debug.log", files);
+    }
+
+    // ----- GetIndexMtime -----
+
+    [Fact]
+    public void GetIndexMtime_ReturnsRecentTimestamp()
+    {
+        var repo = NewRepo("mtime");
+        WriteText(repo, "a.txt", "x");
+        Run(repo, "add", "a.txt");
+        Run(repo, "commit", "-q", "-m", "init");
+
+        var handle = GitRepository.Open(repo);
+        var mtime = handle.GetIndexMtime();
+
+        Assert.NotNull(mtime);
+        // Should be within the last minute.
+        Assert.True(DateTimeOffset.UtcNow - mtime.Value < TimeSpan.FromMinutes(1));
+    }
+
+    [Fact]
+    public void GetIndexMtime_ChangesAfterGitOperation()
+    {
+        var repo = NewRepo("mtime-change");
+        WriteText(repo, "a.txt", "x");
+        Run(repo, "add", "a.txt");
+        Run(repo, "commit", "-q", "-m", "c1");
+
+        var handle = GitRepository.Open(repo);
+        var mtime1 = handle.GetIndexMtime();
+
+        // Force a mtime change by staging something new.
+        System.Threading.Thread.Sleep(50); // ensure mtime tick
+        WriteText(repo, "b.txt", "y");
+        Run(repo, "add", "b.txt");
+
+        var mtime2 = handle.GetIndexMtime();
+
+        Assert.NotNull(mtime1);
+        Assert.NotNull(mtime2);
+        Assert.True(mtime2!.Value >= mtime1!.Value);
+    }
+
     // ----- internal helpers -----
 
     [Fact]

@@ -412,6 +412,64 @@ public sealed class SqliteIndex : IAsyncDisposable
         return result;
     }
 
+    /// <summary>
+    /// Return every <c>(path, sha256)</c> pair from the <c>files</c> table in
+    /// a single query. Used by the reconciliation pass to diff the index
+    /// contents against git's file set without N individual round-trips.
+    /// </summary>
+    public async ValueTask<IReadOnlyDictionary<string, byte[]>> GetAllPathsWithShaAsync(
+        CancellationToken cancellationToken)
+    {
+        ThrowIfDisposed();
+        await using var lease = await RentReaderAsync(cancellationToken).ConfigureAwait(false);
+        using var cmd = lease.Connection.CreateCommand();
+        cmd.CommandText = "SELECT path, sha256 FROM files ORDER BY path;";
+        var dict = new Dictionary<string, byte[]>(StringComparer.Ordinal);
+        using var reader = await cmd.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            var path = reader.GetString(0);
+            var sha = reader.IsDBNull(1) ? Array.Empty<byte>() : (byte[])reader[1];
+            dict[path] = sha;
+        }
+        return dict;
+    }
+
+    /// <summary>
+    /// Return the <c>file_id</c> for the given <paramref name="path"/>, or
+    /// <c>null</c> when no such file is indexed.
+    /// </summary>
+    /// <remarks>
+    /// Used by <c>FileDeleted</c> processing in the incremental indexer to
+    /// resolve the ID before calling <see cref="DeleteFile"/>.
+    /// </remarks>
+    public long? LookupFileIdByPath(string path)
+    {
+        ThrowIfDisposed();
+        using var cmd = _writer.CreateCommand();
+        cmd.CommandText = "SELECT file_id FROM files WHERE path = $p;";
+        cmd.Parameters.AddWithValue("$p", path);
+        var result = cmd.ExecuteScalar();
+        return result is long id ? id : null;
+    }
+
+    /// <summary>
+    /// Batch-delete multiple files in one transaction. Removes from
+    /// <c>code_fts</c>, <c>prose_fts</c>, and <c>files</c> for each ID.
+    /// </summary>
+    /// <remarks>
+    /// Used when a branch switch removes many files at once. Each call to
+    /// <see cref="DeleteFile"/> issues three statements; this method batches
+    /// them for efficiency but delegates per-row to the same logic.
+    /// </remarks>
+    public static void BulkDeleteFiles(WriterScope scope, IReadOnlyList<long> fileIds)
+    {
+        if (scope is null) throw new ArgumentNullException(nameof(scope));
+        if (fileIds is null) throw new ArgumentNullException(nameof(fileIds));
+        foreach (var id in fileIds)
+            DeleteFile(scope, id);
+    }
+
     /// <summary>Enumerate every <c>(file_id, path)</c> in stable order.</summary>
     public async ValueTask<IReadOnlyList<(long FileId, string Path)>> ListFilesAsync(
         CancellationToken cancellationToken)
