@@ -10,11 +10,12 @@ namespace Indexed.Service;
 /// </summary>
 /// <remarks>
 /// <para>
-/// In Stage 1 the only implementation is <see cref="RipgrepSearchBackend"/>,
-/// which shells out to <c>rg</c>. Stage 2 replaces it with a SQLite
-/// FTS5–backed implementation. The interface stays small on purpose:
-/// implementations own their own parsing, budgets, and freshness reporting
-/// and are swapped end-to-end.
+/// As of Stage 2 the production implementation is
+/// <see cref="SqliteSearchBackend"/>, which answers code-mode queries from the
+/// per-repo SQLite+FTS5 index. Test doubles are injected through
+/// <see cref="DaemonOptions.BackendOverride"/>. The interface stays small on
+/// purpose: implementations own their own parsing, budgets, and freshness
+/// reporting and are swapped end-to-end.
 /// </para>
 /// </remarks>
 public interface ISearchBackend

@@ -29,6 +29,7 @@ public sealed class DaemonPaths
         RootDirectory = rootDirectory;
         DaemonJsonPath = Path.Combine(rootDirectory, "daemon.json");
         LogsDirectory = Path.Combine(rootDirectory, "logs");
+        IndexDbPath = Path.Combine(rootDirectory, "index.db");
     }
 
     /// <summary>
@@ -42,6 +43,12 @@ public sealed class DaemonPaths
 
     /// <summary>Directory for rotating log files.</summary>
     public string LogsDirectory { get; }
+
+    /// <summary>
+    /// Path to the SQLite+FTS5 index file (<c>index.db</c>). The file is
+    /// created lazily on first open; sidecar WAL/SHM files live alongside it.
+    /// </summary>
+    public string IndexDbPath { get; }
 
     /// <summary>
     /// Resolve paths for the repo identified by <paramref name="repoId"/>.

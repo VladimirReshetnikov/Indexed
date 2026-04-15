@@ -276,6 +276,83 @@ public sealed class DaemonHostIntegrationTests : IDisposable
     }
 
     [Fact]
+    public async Task DefaultBackend_AnswersCodeSearchFromSqliteIndex()
+    {
+        // No BackendOverride → DaemonHost opens index.db, runs a full scan on
+        // the seeded repo, and the SqliteSearchBackend serves the query.
+        var repo = NewRepoWithContent(new[]
+        {
+            ("hello.cs", "class Hello { void M() { var needle = 42; } }"),
+            ("other.cs", "class Other { }"),
+        });
+        var appData = Path.Combine(_tempRoot, "appdata-real");
+        Directory.CreateDirectory(appData);
+
+        var host = new DaemonHost(new DaemonOptions
+        {
+            RepoRoot = repo,
+            AppDataBase = appData,
+            UseSingletonMutex = false,
+            IdleTimeout = TimeSpan.FromMinutes(5),
+        });
+
+        try
+        {
+            await host.StartAsync();
+            _ = host.RunAsync();
+
+            using var http = new HttpClient
+            {
+                BaseAddress = new Uri($"http://127.0.0.1:{host.Info.Port}/"),
+                Timeout = TimeSpan.FromSeconds(10),
+            };
+
+            using var resp = await http.PostAsJsonAsync(
+                "search",
+                new SearchRequest("needle", Mode: QueryMode.Code),
+                IndexedJsonContext.Default.SearchRequest);
+            resp.EnsureSuccessStatusCode();
+
+            await using var stream = await resp.Content.ReadAsStreamAsync();
+            var body = JsonSerializer.Deserialize(stream, IndexedJsonContext.Default.SearchResponse);
+            Assert.NotNull(body);
+            var match = Assert.Single(body!.Matches);
+            Assert.Equal("hello.cs", match.Path);
+            Assert.Contains("needle", match.Text);
+
+            // Status reflects real schema version and fresh index.
+            var status = await http.GetFromJsonAsync(
+                "status", IndexedJsonContext.Default.StatusResponse);
+            Assert.NotNull(status);
+            Assert.Equal(1, status!.SchemaVersion);
+            Assert.False(status.Freshness.IsStale);
+        }
+        finally
+        {
+            await host.DisposeAsync();
+        }
+    }
+
+    private string NewRepoWithContent((string path, string content)[] files)
+    {
+        var path = Path.Combine(_tempRoot, "repo-" + Guid.NewGuid().ToString("N")[..8]);
+        Directory.CreateDirectory(path);
+        GitProcess.RunText(path, new[] { "init", "-q", "-b", "main" });
+        GitProcess.RunText(path, new[] { "config", "user.name", "t" });
+        GitProcess.RunText(path, new[] { "config", "user.email", "t@t" });
+        GitProcess.RunText(path, new[] { "config", "commit.gpgsign", "false" });
+        foreach (var (relPath, content) in files)
+        {
+            var full = Path.Combine(path, relPath.Replace('/', Path.DirectorySeparatorChar));
+            Directory.CreateDirectory(Path.GetDirectoryName(full)!);
+            File.WriteAllText(full, content);
+        }
+        GitProcess.RunText(path, new[] { "add", "-A" });
+        GitProcess.RunText(path, new[] { "commit", "-q", "-m", "init" });
+        return path;
+    }
+
+    [Fact]
     public async Task DisposeDeletesDaemonJson()
     {
         var (host, http) = await StartHostAsync(new FakeBackend(SearchBackendResult.Ok(

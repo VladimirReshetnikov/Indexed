@@ -57,6 +57,7 @@ public static class ArgumentParser
         var caseSensitive = false;
         string? pathGlob = null;
         List<string>? excludeGlob = null;
+        List<string>? indexExcludeGlob = null;
         List<SpanKind>? kindFilter = null;
         var contextBefore = 0;
         var contextAfter = 0;
@@ -96,6 +97,9 @@ public static class ArgumentParser
                         break;
                     case "--exclude":
                         (excludeGlob ??= new List<string>()).Add(TakeArg(ref i, a)!);
+                        break;
+                    case "--exclude-index":
+                        (indexExcludeGlob ??= new List<string>()).Add(TakeArg(ref i, a)!);
                         break;
                     case "--kind":
                         (kindFilter ??= new List<SpanKind>()).Add(ParseKind(TakeArg(ref i, a)!));
@@ -157,6 +161,7 @@ public static class ArgumentParser
             CaseSensitive = caseSensitive,
             PathGlob = pathGlob,
             ExcludeGlob = excludeGlob,
+            IndexExcludeGlob = indexExcludeGlob,
             KindFilter = kindFilter,
             ContextBefore = contextBefore,
             ContextAfter = contextAfter,
@@ -213,6 +218,7 @@ public static class ArgumentParser
           --case-sensitive, -s          case-sensitive match
           --glob, -g <glob>             restrict to paths matching glob
           --exclude <glob>              exclude paths (repeatable)
+          --exclude-index <glob>        skip files from indexing (repeatable)
           --kind <kind>                 filter by span kind (repeatable)
           --context-before, -B <n>      lines of leading context
           --context-after,  -A <n>      lines of trailing context

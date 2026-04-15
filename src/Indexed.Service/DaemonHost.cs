@@ -1,5 +1,6 @@
 using System;
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.Net;
 using System.Net.Sockets;
@@ -7,6 +8,7 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Indexed.Abstractions;
+using Indexed.Core;
 using Indexed.Git;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -25,10 +27,12 @@ namespace Indexed.Service;
 /// </para>
 /// <para>
 /// Request handlers are cheap — they delegate to an <see cref="ISearchBackend"/>
-/// for <c>/search</c> and return cached metadata for everything else. The
-/// host is explicit about what it does <em>not</em> do: no indexing, no git
-/// watching, no file I/O beyond <c>daemon.json</c>. Those layers are bolted
-/// on later (Stage 2+) without changing this class's shape.
+/// for <c>/search</c> and return cached metadata for everything else. Stage 2
+/// adds ownership of the per-repo <see cref="SqliteIndex"/>: the host opens
+/// <c>index.db</c> during <see cref="StartAsync"/>, runs a synchronous full
+/// scan if the DB is empty, and disposes the index on shutdown. No watcher is
+/// wired yet — <c>POST /rescan</c> runs another full scan on the request
+/// thread; Stage 4 moves that to a background worker with incremental diffs.
 /// </para>
 /// <para>
 /// Lifecycle:
@@ -51,9 +55,11 @@ internal sealed class DaemonHost : IAsyncDisposable
     private DaemonPaths? _paths;
     private Mutex? _singletonMutex;
     private HttpListener? _listener;
+    private SqliteIndex? _index;
     private ISearchBackend? _backend;
     private IdleExitTimer? _idleTimer;
     private DaemonInfo? _info;
+    private IndexStatistics? _lastScan;
 
     public DaemonHost(DaemonOptions options, ILogger<DaemonHost>? logger = null)
     {
@@ -76,7 +82,7 @@ internal sealed class DaemonHost : IAsyncDisposable
     /// Throws <see cref="DaemonAlreadyRunningException"/> when another
     /// daemon already holds the mutex for the same <see cref="RepoId"/>.
     /// </remarks>
-    public Task StartAsync(CancellationToken cancellationToken = default)
+    public async Task StartAsync(CancellationToken cancellationToken = default)
     {
         _repo = GitRepository.Open(_options.RepoRoot);
         _repoId = RepoId.Compute(_repo.RepoRoot, _repo.GetFirstCommitSha());
@@ -87,7 +93,30 @@ internal sealed class DaemonHost : IAsyncDisposable
             AcquireMutex();
 
         BindListener();
-        _backend = _options.BackendOverride ?? new RipgrepSearchBackend(_repo, BuildFreshness);
+
+        if (_options.BackendOverride is not null)
+        {
+            _backend = _options.BackendOverride;
+        }
+        else
+        {
+            _index = SqliteIndex.OpenOrCreate(_paths.IndexDbPath);
+            _index.SetMeta(Indexed.Core.SqliteSchema.MetaKey_RepoId, _repoId);
+
+            if (_options.RunInitialScan && _index.GetFileCount() == 0)
+            {
+                _logger.LogInformation("index is empty; running full scan");
+                var scanStarted = Stopwatch.StartNew();
+                var indexer = new FullScanIndexer(_repo, _index, _options.IndexExcludeGlobs, _logger);
+                _lastScan = await indexer.RunAsync(progress: null, cancellationToken).ConfigureAwait(false);
+                _logger.LogInformation(
+                    "initial full scan complete: indexed={Indexed} skipped={Skipped} unchanged={Unchanged} total={Total} elapsed={ElapsedMs}ms",
+                    _lastScan.Indexed, _lastScan.Skipped, _lastScan.Unchanged, _lastScan.Total,
+                    scanStarted.ElapsedMilliseconds);
+            }
+
+            _backend = new SqliteSearchBackend(_index, BuildFreshness);
+        }
 
         _info = new DaemonInfo(
             Port: _listener!.Prefixes.Count == 0 ? 0 : ExtractPort(_listener),
@@ -108,8 +137,6 @@ internal sealed class DaemonHost : IAsyncDisposable
         _logger.LogInformation(
             "daemon listening on port {Port}, repoId={RepoId}, pid={Pid}",
             _info.Port, _info.RepoId, _info.Pid);
-
-        return Task.CompletedTask;
     }
 
     /// <summary>
@@ -164,6 +191,12 @@ internal sealed class DaemonHost : IAsyncDisposable
 
         _idleTimer?.Dispose();
 
+        if (_index is not null)
+        {
+            try { await _index.DisposeAsync().ConfigureAwait(false); } catch { }
+            _index = null;
+        }
+
         try
         {
             _singletonMutex?.ReleaseMutex();
@@ -172,7 +205,6 @@ internal sealed class DaemonHost : IAsyncDisposable
         _singletonMutex?.Dispose();
 
         _shutdownCts.Dispose();
-        await Task.CompletedTask;
     }
 
     // ----- request handling -----
@@ -266,8 +298,20 @@ internal sealed class DaemonHost : IAsyncDisposable
 
         if (method == "POST" && path == "/rescan")
         {
-            // Stage 1: ripgrep backend has no index to rescan. Stage 4 wires
-            // this to the real indexer worker.
+            // Stage 2: rescan synchronously on the request thread. Stage 4
+            // moves this to a background queue with progress reporting.
+            if (_index is not null && _repo is not null)
+            {
+                try
+                {
+                    var indexer = new FullScanIndexer(_repo, _index, _options.IndexExcludeGlobs, _logger);
+                    _lastScan = await indexer.RunAsync(progress: null, _shutdownCts.Token).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    // shutdown requested mid-rescan — fall through to status reply
+                }
+            }
             await WriteJsonAsync(
                 context.Response, 200, BuildStatus(), IndexedJsonContext.Default.StatusResponse)
                 .ConfigureAwait(false);
@@ -303,7 +347,7 @@ internal sealed class DaemonHost : IAsyncDisposable
     private StatusResponse BuildStatus()
         => new(
             DaemonVersion: _options.DaemonVersion,
-            SchemaVersion: 0,
+            SchemaVersion: _index?.SchemaVersion ?? 0,
             Pid: Environment.ProcessId,
             RepoRoot: _repo!.RepoRoot,
             RepoId: _repoId!,
@@ -316,13 +360,39 @@ internal sealed class DaemonHost : IAsyncDisposable
         try { head = _repo!.GetHeadSha(); }
         catch { /* transient git error — leave as null */ }
 
+        string? indexedHead = null;
+        DateTimeOffset? lastFullScan = null;
+        string? note = null;
+
+        if (_index is null)
+        {
+            note = "test backend override in use; no index present.";
+        }
+        else
+        {
+            indexedHead = _index.GetMeta(SqliteSchema.MetaKey_IndexedHead);
+            if (string.IsNullOrEmpty(indexedHead)) indexedHead = null;
+
+            var lastScanRaw = _index.GetMeta(SqliteSchema.MetaKey_LastFullScanAt);
+            if (!string.IsNullOrEmpty(lastScanRaw)
+                && long.TryParse(lastScanRaw, NumberStyles.Integer, CultureInfo.InvariantCulture, out var lastScanUnix))
+            {
+                lastFullScan = DateTimeOffset.FromUnixTimeSeconds(lastScanUnix);
+            }
+        }
+
+        var currentHead = string.IsNullOrEmpty(head) ? null : head;
+        var isStale = indexedHead is null
+            || currentHead is null
+            || !string.Equals(indexedHead, currentHead, StringComparison.Ordinal);
+
         return new Freshness(
-            IndexedHead: null,
-            CurrentHead: string.IsNullOrEmpty(head) ? null : head,
+            IndexedHead: indexedHead,
+            CurrentHead: currentHead,
             PendingFileCount: 0,
-            LastFullScanAt: null,
-            IsStale: true,
-            Note: "ripgrep-backed; no index present yet.");
+            LastFullScanAt: lastFullScan,
+            IsStale: isStale,
+            Note: note);
     }
 
     private void AcquireMutex()

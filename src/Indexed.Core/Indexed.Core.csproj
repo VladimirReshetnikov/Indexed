@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+    <PropertyGroup>
+        <AssemblyName>Indexed.Core</AssemblyName>
+        <RootNamespace>Indexed.Core</RootNamespace>
+    </PropertyGroup>
+    <ItemGroup>
+        <ProjectReference Include="../Indexed.Abstractions/Indexed.Abstractions.csproj" />
+        <ProjectReference Include="../Indexed.Git/Indexed.Git.csproj" />
+    </ItemGroup>
+    <ItemGroup>
+        <PackageReference Include="Microsoft.Data.Sqlite" Version="9.0.8" />
+        <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="9.0.0" />
+    </ItemGroup>
+    <ItemGroup>
+        <InternalsVisibleTo Include="Indexed.Core.Tests" />
+        <InternalsVisibleTo Include="Indexed.Service.Tests" />
+    </ItemGroup>
+</Project>

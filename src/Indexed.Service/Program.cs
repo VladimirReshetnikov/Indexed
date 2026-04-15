@@ -19,6 +19,7 @@ using Microsoft.Extensions.Logging;
 var repoRoot = args.Length > 0 ? args[0] : Directory.GetCurrentDirectory();
 var idleSeconds = (int)TimeSpan.FromMinutes(30).TotalSeconds;
 string? appData = null;
+var excludeGlobs = new System.Collections.Generic.List<string>();
 
 for (var i = 1; i < args.Length; i++)
 {
@@ -31,6 +32,10 @@ for (var i = 1; i < args.Length; i++)
         case "--app-data":
             if (i + 1 < args.Length)
                 appData = args[++i];
+            break;
+        case "--exclude-index":
+            if (i + 1 < args.Length)
+                excludeGlobs.Add(args[++i]);
             break;
     }
 }
@@ -45,6 +50,7 @@ var options = new DaemonOptions
     RepoRoot = repoRoot,
     AppDataBase = appData,
     IdleTimeout = TimeSpan.FromSeconds(idleSeconds),
+    IndexExcludeGlobs = excludeGlobs.Count > 0 ? excludeGlobs : null,
 };
 
 await using var host = new DaemonHost(options, logger);

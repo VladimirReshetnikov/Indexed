@@ -46,7 +46,8 @@ internal static class CliApp
             using var client = await DaemonClient.CreateAsync(
                 repoRoot,
                 appData: null,
-                startupTimeout: TimeSpan.FromSeconds(15),
+                startupTimeout: null, // 120 s default; cold scan can take tens of seconds
+                indexExcludeGlobs: args.IndexExcludeGlob,
                 cancellationToken: cancellationToken).ConfigureAwait(false);
 
             return args.Command switch

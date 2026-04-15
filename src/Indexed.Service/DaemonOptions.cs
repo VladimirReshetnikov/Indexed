@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 
 namespace Indexed.Service;
 
@@ -11,7 +12,7 @@ namespace Indexed.Service;
 /// to exercise edge cases — a short <see cref="IdleTimeout"/> to observe
 /// auto-exit, a custom <see cref="AppDataBase"/> to isolate the per-repo
 /// directory under the test's temp root, a <see cref="BackendOverride"/> to
-/// avoid launching real ripgrep subprocesses.
+/// short-circuit the real SQLite index path.
 /// </para>
 /// </remarks>
 public sealed record DaemonOptions
@@ -40,9 +41,32 @@ public sealed record DaemonOptions
 
     /// <summary>
     /// Optional backend injection for tests. When <c>null</c>, the host
-    /// constructs a <see cref="RipgrepSearchBackend"/>.
+    /// opens the per-repo <c>index.db</c>, runs a full scan if empty, and
+    /// constructs a <see cref="SqliteSearchBackend"/>.
     /// </summary>
     public ISearchBackend? BackendOverride { get; init; }
+
+    /// <summary>
+    /// When <c>true</c> (default), <see cref="DaemonHost.StartAsync"/> runs a
+    /// <see cref="Indexed.Core.FullScanIndexer"/> before returning if the
+    /// index is empty. Tests that want to observe a cold daemon without
+    /// waiting on indexing set this to <c>false</c> and control the index
+    /// contents directly.
+    /// </summary>
+    public bool RunInitialScan { get; init; } = true;
+
+    /// <summary>
+    /// Gitignore-style globs applied to repository-relative POSIX paths
+    /// during full-scan indexing. Matching files are skipped before reading.
+    /// Useful for large vendored trees like <c>lib/**</c> that inflate the
+    /// FTS5 trigram index without providing search value.
+    /// </summary>
+    /// <example>
+    /// <code>
+    /// IndexExcludeGlobs = new[] { "lib/**", "vendor/**" }
+    /// </code>
+    /// </example>
+    public IReadOnlyList<string>? IndexExcludeGlobs { get; init; }
 
     /// <summary>
     /// Version string reported by <c>/status</c> and stamped in

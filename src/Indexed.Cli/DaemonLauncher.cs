@@ -43,6 +43,7 @@ internal static class DaemonLauncher
         string daemonJsonPath,
         TimeSpan timeout,
         string? appData = null,
+        IReadOnlyList<string>? indexExcludeGlobs = null,
         CancellationToken cancellationToken = default)
     {
         var exe = ResolveServiceExecutable()
@@ -63,6 +64,14 @@ internal static class DaemonLauncher
         {
             psi.ArgumentList.Add("--app-data");
             psi.ArgumentList.Add(appData);
+        }
+        if (indexExcludeGlobs is not null)
+        {
+            foreach (var glob in indexExcludeGlobs)
+            {
+                psi.ArgumentList.Add("--exclude-index");
+                psi.ArgumentList.Add(glob);
+            }
         }
 
         using var _ = Process.Start(psi)

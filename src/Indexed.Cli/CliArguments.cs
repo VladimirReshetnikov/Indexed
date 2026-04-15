@@ -57,6 +57,12 @@ public sealed record CliArguments
     /// <summary>Override the repository root (defaults to <c>cwd</c>).</summary>
     public string? RepoRoot { get; init; }
 
+    /// <summary>
+    /// Index-time exclude globs forwarded to the daemon on launch.
+    /// Matching files are skipped during full-scan indexing.
+    /// </summary>
+    public IReadOnlyList<string>? IndexExcludeGlob { get; init; }
+
     /// <summary>Parse error message for <see cref="CliCommand.Help"/>.</summary>
     public string? Diagnostic { get; init; }
 }

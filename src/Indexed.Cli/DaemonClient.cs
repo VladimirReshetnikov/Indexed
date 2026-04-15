@@ -56,6 +56,7 @@ internal sealed class DaemonClient : IDisposable
         string repoRoot,
         string? appData = null,
         TimeSpan? startupTimeout = null,
+        IReadOnlyList<string>? indexExcludeGlobs = null,
         CancellationToken cancellationToken = default)
     {
         var repo = Indexed.Git.GitRepository.Open(repoRoot);
@@ -69,11 +70,15 @@ internal sealed class DaemonClient : IDisposable
 
         DaemonInfo.TryDelete(paths.DaemonJsonPath);
 
+        // Cold start includes the initial full scan (proposal §14 targets
+        // ≤60 s for this repo). Give the daemon generous headroom here; the
+        // caller can still override via startupTimeout for tests.
         var launched = await DaemonLauncher.LaunchAsync(
             repo.RepoRoot,
             paths.DaemonJsonPath,
-            startupTimeout ?? TimeSpan.FromSeconds(10),
+            startupTimeout ?? TimeSpan.FromSeconds(120),
             appData,
+            indexExcludeGlobs,
             cancellationToken).ConfigureAwait(false);
 
         if (launched is null)
