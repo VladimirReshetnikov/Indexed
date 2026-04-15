@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+    <PropertyGroup>
+        <OutputType>Exe</OutputType>
+        <AssemblyName>idx</AssemblyName>
+        <RootNamespace>Indexed.Cli</RootNamespace>
+        <RollForward>LatestMajor</RollForward>
+    </PropertyGroup>
+    <ItemGroup>
+        <ProjectReference Include="../Indexed.Abstractions/Indexed.Abstractions.csproj" />
+        <ProjectReference Include="../Indexed.Git/Indexed.Git.csproj" />
+        <ProjectReference Include="../Indexed.Service/Indexed.Service.csproj" />
+    </ItemGroup>
+    <ItemGroup>
+        <InternalsVisibleTo Include="Indexed.Cli.Tests" />
+    </ItemGroup>
+</Project>

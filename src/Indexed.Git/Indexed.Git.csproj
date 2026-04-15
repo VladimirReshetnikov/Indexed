@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+    <PropertyGroup>
+        <AssemblyName>Indexed.Git</AssemblyName>
+        <RootNamespace>Indexed.Git</RootNamespace>
+    </PropertyGroup>
+    <ItemGroup>
+        <InternalsVisibleTo Include="Indexed.Git.Tests" />
+        <InternalsVisibleTo Include="Indexed.Service.Tests" />
+    </ItemGroup>
+</Project>

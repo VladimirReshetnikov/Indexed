@@ -1,0 +1,57 @@
+using System;
+
+namespace Indexed.Service;
+
+/// <summary>
+/// Configuration for a single <see cref="DaemonHost"/> instance.
+/// </summary>
+/// <remarks>
+/// <para>
+/// Options are immutable once passed to the host. Tests override the defaults
+/// to exercise edge cases — a short <see cref="IdleTimeout"/> to observe
+/// auto-exit, a custom <see cref="AppDataBase"/> to isolate the per-repo
+/// directory under the test's temp root, a <see cref="BackendOverride"/> to
+/// avoid launching real ripgrep subprocesses.
+/// </para>
+/// </remarks>
+public sealed record DaemonOptions
+{
+    /// <summary>Repository working-tree root the daemon will serve.</summary>
+    public required string RepoRoot { get; init; }
+
+    /// <summary>
+    /// Override for the <c>%APPDATA%\Indexed</c> parent of the per-repo
+    /// directory. <c>null</c> uses the real roaming profile.
+    /// </summary>
+    public string? AppDataBase { get; init; }
+
+    /// <summary>
+    /// Duration of no-request + no-index-activity after which the daemon
+    /// exits. Default 30 minutes per proposal §9.2.
+    /// </summary>
+    public TimeSpan IdleTimeout { get; init; } = TimeSpan.FromMinutes(30);
+
+    /// <summary>
+    /// Whether to acquire the single-instance named mutex at startup. Tests
+    /// that run several daemons side-by-side in-process set this to
+    /// <c>false</c>.
+    /// </summary>
+    public bool UseSingletonMutex { get; init; } = true;
+
+    /// <summary>
+    /// Optional backend injection for tests. When <c>null</c>, the host
+    /// constructs a <see cref="RipgrepSearchBackend"/>.
+    /// </summary>
+    public ISearchBackend? BackendOverride { get; init; }
+
+    /// <summary>
+    /// Version string reported by <c>/status</c> and stamped in
+    /// <c>daemon.json</c>. Defaults to the assembly's informational version.
+    /// </summary>
+    public string DaemonVersion { get; init; } =
+        typeof(DaemonOptions).Assembly
+            .GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false)
+            is [System.Reflection.AssemblyInformationalVersionAttribute ia, ..]
+            ? ia.InformationalVersion
+            : "0.1.0-s1";
+}
