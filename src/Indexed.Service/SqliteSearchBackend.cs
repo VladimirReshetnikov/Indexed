@@ -30,11 +30,19 @@ internal sealed class SqliteSearchBackend : ISearchBackend
 {
     private readonly SqliteIndex _index;
     private readonly Func<Freshness> _freshnessProvider;
+    private readonly FileContentProvider _contentProvider;
+    private readonly DebouncingEventQueue? _repairQueue;
 
-    public SqliteSearchBackend(SqliteIndex index, Func<Freshness> freshnessProvider)
+    public SqliteSearchBackend(
+        SqliteIndex index,
+        Func<Freshness> freshnessProvider,
+        FileContentProvider contentProvider,
+        DebouncingEventQueue? repairQueue = null)
     {
         _index = index ?? throw new ArgumentNullException(nameof(index));
         _freshnessProvider = freshnessProvider ?? throw new ArgumentNullException(nameof(freshnessProvider));
+        _contentProvider = contentProvider ?? throw new ArgumentNullException(nameof(contentProvider));
+        _repairQueue = repairQueue;
     }
 
     public async ValueTask<SearchBackendResult> SearchAsync(
@@ -77,7 +85,7 @@ internal sealed class SqliteSearchBackend : ISearchBackend
 
         try
         {
-            var executor = new CodeQueryExecutor(_index);
+            var executor = new CodeQueryExecutor(_index, _contentProvider, _repairQueue);
             var result = await executor.ExecuteAsync(request, plan, timeoutCts.Token).ConfigureAwait(false);
 
             return SearchBackendResult.Ok(new SearchResponse(

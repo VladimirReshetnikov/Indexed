@@ -7,6 +7,7 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Indexed.Abstractions;
+using Indexed.Core;
 using Indexed.Git;
 using Indexed.Service;
 using Xunit;
@@ -324,7 +325,7 @@ public sealed class DaemonHostIntegrationTests : IDisposable
             var status = await http.GetFromJsonAsync(
                 "status", IndexedJsonContext.Default.StatusResponse);
             Assert.NotNull(status);
-            Assert.Equal(1, status!.SchemaVersion);
+            Assert.Equal(SqliteSchema.Version, status!.SchemaVersion);
             Assert.False(status.Freshness.IsStale);
         }
         finally

@@ -437,9 +437,20 @@ public sealed class SqliteIndex : IAsyncDisposable
     }
 
     /// <summary>
-    /// Fetch <c>(path, content)</c> for the given <paramref name="fileIds"/>.
-    /// Order matches <paramref name="fileIds"/>.
+    /// Fetch <c>(file_id, path, sha256)</c> rows for the given
+    /// <paramref name="fileIds"/>. Order matches <paramref name="fileIds"/>.
     /// </summary>
+    /// <remarks>
+    /// <para>
+    /// As of schema version 2 this method does not return file content —
+    /// <see cref="FileRow"/> carries only the identity/path/hash tuple.
+    /// Callers that need content (e.g. <see cref="CodeQueryExecutor"/>)
+    /// read it from the working tree via <see cref="FileContentProvider"/>.
+    /// The rationale — dropping the stored content cuts the index size by
+    /// roughly the source tree size — lives in
+    /// <c>Indexed-Size-Reduction-SafeNearTerm-Plan.md §Workstream C</c>.
+    /// </para>
+    /// </remarks>
     public async ValueTask<IReadOnlyList<FileRow>> GetFilesAsync(
         IReadOnlyList<long> fileIds,
         CancellationToken cancellationToken)
@@ -463,15 +474,15 @@ public sealed class SqliteIndex : IAsyncDisposable
                 cmd.Parameters.AddWithValue(parms[i], fileIds[offset + i]);
             }
             cmd.CommandText =
-                $"SELECT f.file_id, f.path, c.content FROM files f JOIN code_fts c ON c.rowid = f.file_id WHERE f.file_id IN ({string.Join(',', parms)});";
+                $"SELECT file_id, path, sha256 FROM files WHERE file_id IN ({string.Join(',', parms)});";
 
             using var reader = await cmd.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
             while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
             {
                 var id = reader.GetInt64(0);
                 var path = reader.GetString(1);
-                var content = reader.IsDBNull(2) ? string.Empty : reader.GetString(2);
-                rows[id] = new FileRow(id, path, content);
+                var sha = reader.IsDBNull(2) ? Array.Empty<byte>() : (byte[])reader[2];
+                rows[id] = new FileRow(id, path, sha);
             }
         }
 
@@ -843,8 +854,18 @@ public sealed class SqliteIndex : IAsyncDisposable
     }
 }
 
-/// <summary>Row projection returned by <see cref="SqliteIndex.GetFilesAsync"/>.</summary>
-public sealed record FileRow(long FileId, string Path, string Content);
+/// <summary>
+/// Row projection returned by <see cref="SqliteIndex.GetFilesAsync"/>. Under
+/// schema version 2 the FTS5 index is contentless; callers must read file
+/// text from the working tree at query time via
+/// <see cref="FileContentProvider"/>. The <see cref="Sha256"/> hash is the
+/// at-index-time content hash — consumers can use it to detect staleness
+/// when the on-disk file differs from what was indexed.
+/// </summary>
+/// <param name="FileId">Primary key from the <c>files</c> table.</param>
+/// <param name="Path">Repository-relative POSIX path.</param>
+/// <param name="Sha256">At-index-time SHA-256 of the file content.</param>
+public sealed record FileRow(long FileId, string Path, byte[] Sha256);
 
 /// <summary>
 /// Exclusive writer scope; all work happens on one transaction that commits

@@ -9,18 +9,23 @@ using Xunit;
 namespace Indexed.Core.Tests;
 
 /// <summary>
-/// End-to-end tests for <see cref="CodeQueryExecutor"/>: seed a SQLite index,
-/// run planner + executor, verify match shape and cap behavior.
+/// End-to-end tests for <see cref="CodeQueryExecutor"/>: seed a SQLite index
+/// AND materialize the same content on disk (schema v2 is contentless — the
+/// executor rehydrates snippets from the working tree), then run planner +
+/// executor and verify match shape and cap behavior.
 /// </summary>
 public sealed class CodeQueryExecutorTests : IDisposable
 {
     private readonly string _tempDir;
+    private readonly string _repoRoot;
     private readonly string _dbPath;
 
     public CodeQueryExecutorTests()
     {
         _tempDir = Path.Combine(Path.GetTempPath(), "IndexedExec_" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(_tempDir);
+        _repoRoot = Path.Combine(_tempDir, "repo");
+        Directory.CreateDirectory(_repoRoot);
         _dbPath = Path.Combine(_tempDir, "index.db");
     }
 
@@ -29,6 +34,12 @@ public sealed class CodeQueryExecutorTests : IDisposable
         try { Directory.Delete(_tempDir, true); } catch { }
     }
 
+    /// <summary>
+    /// Seed both the index and the on-disk working tree with the same content.
+    /// The index sees the content via <see cref="SqliteIndex.UpsertFile"/> so
+    /// the FTS5 trigram posting list picks up candidates; the executor then
+    /// re-reads the bytes from <paramref name="_repoRoot"/> via the provider.
+    /// </summary>
     private async Task<SqliteIndex> SeedAsync((string path, string content)[] files)
     {
         var index = SqliteIndex.OpenOrCreate(_dbPath);
@@ -44,9 +55,16 @@ public sealed class CodeQueryExecutorTests : IDisposable
                 language: null,
                 indexedAt: 1,
                 content: content);
+
+            var full = Path.Combine(_repoRoot, path.Replace('/', Path.DirectorySeparatorChar));
+            Directory.CreateDirectory(Path.GetDirectoryName(full)!);
+            File.WriteAllText(full, content);
         }
         return index;
     }
+
+    private CodeQueryExecutor NewExecutor(SqliteIndex index)
+        => new(index, new FileContentProvider(_repoRoot));
 
     [Fact]
     public async Task LiteralMatch_ReturnsLineAndColumn()
@@ -58,7 +76,7 @@ public sealed class CodeQueryExecutorTests : IDisposable
 
         var request = new SearchRequest("hello", Mode: QueryMode.Code);
         var plan = CodeQueryPlanner.Build(request);
-        var result = await new CodeQueryExecutor(index).ExecuteAsync(request, plan, default);
+        var result = await NewExecutor(index).ExecuteAsync(request, plan, default);
 
         var match = Assert.Single(result.Matches);
         Assert.Equal("a.cs", match.Path);
@@ -77,7 +95,7 @@ public sealed class CodeQueryExecutorTests : IDisposable
 
         var request = new SearchRequest(@"foo", IsRegex: true, Mode: QueryMode.Code);
         var plan = CodeQueryPlanner.Build(request);
-        var result = await new CodeQueryExecutor(index).ExecuteAsync(request, plan, default);
+        var result = await NewExecutor(index).ExecuteAsync(request, plan, default);
 
         Assert.Equal(3, result.Matches.Count);
         Assert.Equal(new[] { 1, 2, 3 }, result.Matches.Select(m => m.Line));
@@ -93,7 +111,7 @@ public sealed class CodeQueryExecutorTests : IDisposable
 
         var request = new SearchRequest("hello", Mode: QueryMode.Code);
         var plan = CodeQueryPlanner.Build(request);
-        var result = await new CodeQueryExecutor(index).ExecuteAsync(request, plan, default);
+        var result = await NewExecutor(index).ExecuteAsync(request, plan, default);
 
         var match = Assert.Single(result.Matches);
         Assert.Equal(2, match.Line);
@@ -111,7 +129,7 @@ public sealed class CodeQueryExecutorTests : IDisposable
         var request = new SearchRequest("TARGET", Mode: QueryMode.Code, CaseSensitive: true,
             ContextBefore: 2, ContextAfter: 2);
         var plan = CodeQueryPlanner.Build(request);
-        var result = await new CodeQueryExecutor(index).ExecuteAsync(request, plan, default);
+        var result = await NewExecutor(index).ExecuteAsync(request, plan, default);
 
         var match = Assert.Single(result.Matches);
         Assert.Equal(new[] { "one", "two" }, match.ContextBefore);
@@ -129,7 +147,7 @@ public sealed class CodeQueryExecutorTests : IDisposable
 
         var request = new SearchRequest("hello", Mode: QueryMode.Code, PathGlob: "src/**");
         var plan = CodeQueryPlanner.Build(request);
-        var result = await new CodeQueryExecutor(index).ExecuteAsync(request, plan, default);
+        var result = await NewExecutor(index).ExecuteAsync(request, plan, default);
 
         var match = Assert.Single(result.Matches);
         Assert.Equal("src/foo.cs", match.Path);
@@ -148,7 +166,7 @@ public sealed class CodeQueryExecutorTests : IDisposable
             "hello", Mode: QueryMode.Code,
             ExcludeGlob: new[] { "**/*.generated.cs" });
         var plan = CodeQueryPlanner.Build(request);
-        var result = await new CodeQueryExecutor(index).ExecuteAsync(request, plan, default);
+        var result = await NewExecutor(index).ExecuteAsync(request, plan, default);
 
         var match = Assert.Single(result.Matches);
         Assert.Equal("src/foo.cs", match.Path);
@@ -163,7 +181,7 @@ public sealed class CodeQueryExecutorTests : IDisposable
 
         var request = new SearchRequest("hit", Mode: QueryMode.Code, MaxMatchesPerFile: 3);
         var plan = CodeQueryPlanner.Build(request);
-        var result = await new CodeQueryExecutor(index).ExecuteAsync(request, plan, default);
+        var result = await NewExecutor(index).ExecuteAsync(request, plan, default);
 
         Assert.Equal(3, result.Matches.Count);
         Assert.True(result.Truncated);
@@ -181,7 +199,7 @@ public sealed class CodeQueryExecutorTests : IDisposable
 
         var request = new SearchRequest("hit", Mode: QueryMode.Code, MaxMatches: 2, MaxMatchesPerFile: 10);
         var plan = CodeQueryPlanner.Build(request);
-        var result = await new CodeQueryExecutor(index).ExecuteAsync(request, plan, default);
+        var result = await NewExecutor(index).ExecuteAsync(request, plan, default);
 
         Assert.Equal(2, result.Matches.Count);
         Assert.True(result.Truncated);

@@ -15,12 +15,29 @@ namespace Indexed.Core;
 /// <remarks>
 /// <para>
 /// Flow: ask the index for candidate file IDs (FTS5 MATCH or full scan), pull
-/// the corresponding <c>(path, content)</c> rows in bounded batches, and scan
-/// each content string for real matches using the pre-compiled regex or a
-/// plain <see cref="string.IndexOf(string, int, StringComparison)"/>. Line
-/// and column numbers are computed by walking the content and counting
-/// newline offsets; context lines are extracted by re-slicing the same string.
+/// the corresponding <c>(path, sha256)</c> rows in bounded batches, read the
+/// live on-disk content via <see cref="FileContentProvider"/>, and scan each
+/// content string for real matches using the pre-compiled regex or a plain
+/// <see cref="string.IndexOf(string, int, StringComparison)"/>. Line and
+/// column numbers are computed by walking the content and counting newline
+/// offsets; context lines are extracted by re-slicing the same string.
 /// </para>
+/// <para>
+/// Correctness under contentless FTS5 (schema v2). The index's trigram
+/// posting list is a candidate oracle — the scanner verifies every match
+/// against the live working tree. Three staleness classes are bounded:
+/// </para>
+/// <list type="bullet">
+///   <item><description>Stale candidates (index ahead of disk edits): the disk scan
+///   naturally returns zero hits for content that no longer exists.</description></item>
+///   <item><description>Missing files: <see cref="FileContentProvider.ReadAsync"/>
+///   yields <c>null</c>; the executor optionally enqueues a
+///   <see cref="FileChanged"/> repair event so the incremental indexer
+///   self-heals.</description></item>
+///   <item><description>Fresh edits not yet indexed: same staleness class as before
+///   — the candidate list may miss a file whose trigrams the indexer has
+///   not yet tokenized. Not a regression from v1.</description></item>
+/// </list>
 /// <para>
 /// Caps and timeouts:
 /// </para>
@@ -40,10 +57,24 @@ namespace Indexed.Core;
 public sealed class CodeQueryExecutor
 {
     private readonly SqliteIndex _index;
+    private readonly FileContentProvider _contentProvider;
+    private readonly DebouncingEventQueue? _repairQueue;
 
-    public CodeQueryExecutor(SqliteIndex index)
+    /// <summary>
+    /// Create an executor that reads content from the working tree via
+    /// <paramref name="contentProvider"/>. Optionally wire
+    /// <paramref name="repairQueue"/> so missing-file observations are
+    /// converted into <see cref="FileChanged"/> events for the incremental
+    /// indexer.
+    /// </summary>
+    public CodeQueryExecutor(
+        SqliteIndex index,
+        FileContentProvider contentProvider,
+        DebouncingEventQueue? repairQueue = null)
     {
         _index = index ?? throw new ArgumentNullException(nameof(index));
+        _contentProvider = contentProvider ?? throw new ArgumentNullException(nameof(contentProvider));
+        _repairQueue = repairQueue;
     }
 
     /// <summary>
@@ -88,7 +119,20 @@ public sealed class CodeQueryExecutor
                 cancellationToken.ThrowIfCancellationRequested();
                 if (!PathAllowed(row.Path, includeRegex, excludeFilter)) continue;
 
-                var hits = ScanFile(request, plan, row, out var fileTruncated);
+                var content = await _contentProvider
+                    .ReadAsync(row.Path, cancellationToken)
+                    .ConfigureAwait(false);
+                if (content is null)
+                {
+                    // File missing/unreadable/oversized since the index was
+                    // written. Enqueue a repair so the incremental indexer
+                    // converges; do not produce a match from a stale index
+                    // row.
+                    _repairQueue?.Enqueue(new FileChanged(row.Path));
+                    continue;
+                }
+
+                var hits = ScanFile(request, plan, row.Path, content, out var fileTruncated);
                 total += hits.ReportedTotal;
                 if (fileTruncated) truncated = true;
 
@@ -126,11 +170,11 @@ public sealed class CodeQueryExecutor
     private static FileHits ScanFile(
         SearchRequest request,
         CodeQueryPlan plan,
-        FileRow row,
+        string path,
+        string content,
         out bool fileTruncated)
     {
         fileTruncated = false;
-        var content = row.Content;
         var matches = new List<Abstractions.Match>();
         var reportedTotal = 0;
 
@@ -151,7 +195,7 @@ public sealed class CodeQueryExecutor
             var after = MatchExtraction.ContextAfter(content, lineOffsets, line, request.ContextAfter);
 
             matches.Add(new Abstractions.Match(
-                Path: row.Path,
+                Path: path,
                 Line: line,
                 Column: col,
                 ByteOffset: hit.Index, // character offset for Stage 2 — UTF-8 byte mapping is Stage 3+

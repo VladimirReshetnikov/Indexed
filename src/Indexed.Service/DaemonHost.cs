@@ -135,10 +135,16 @@ internal sealed class DaemonHost : IAsyncDisposable
                     scanStarted.ElapsedMilliseconds);
             }
 
-            _backend = new SqliteSearchBackend(_index, BuildFreshness);
-
             // Stage 4: start the incremental indexer pipeline.
             _eventQueue = new DebouncingEventQueue();
+
+            // Schema v2: FTS5 is contentless — the backend reads live content
+            // from disk at query time via FileContentProvider. Failed reads
+            // (missing, unreadable, oversize) are fed back into the event
+            // queue so the incremental indexer self-heals.
+            var contentProvider = new FileContentProvider(_repo.RepoRoot);
+            _backend = new SqliteSearchBackend(_index, BuildFreshness, contentProvider, _eventQueue);
+
             _incrementalIndexer = new IncrementalIndexer(
                 _repo, _index, _eventQueue, effectiveExcludes, _logger);
 

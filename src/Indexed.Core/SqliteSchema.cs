@@ -5,27 +5,38 @@ namespace Indexed.Core;
 /// </summary>
 /// <remarks>
 /// <para>
-/// Stage 2 defines schema version 1: <c>files</c>, <c>code_fts</c> (FTS5
-/// trigram), <c>prose_fts</c> (FTS5 porter+unicode61, populated by Stage 3
-/// extractors), and a <c>meta</c> KV holding the schema version and repo
-/// identity. The <c>prose_fts</c> table is created eagerly so Stage 3 can
-/// start writing to it without a schema migration.
+/// Schema version 2 defines: <c>files</c> (authoritative path/sha/language
+/// row), <c>code_fts</c> as a <em>contentless</em> FTS5 trigram index
+/// (tokenizes at write time but stores no content — snippets are rehydrated
+/// from the working tree at query time), <c>prose_fts</c> (FTS5
+/// porter+unicode61, content stored), and a <c>meta</c> KV for schema
+/// version and repo identity.
 /// </para>
 /// <para>
 /// Schema changes are breaking: if <see cref="Version"/> is bumped,
 /// <see cref="SqliteIndex"/> deletes the existing <c>index.db</c> and recreates
-/// it from scratch. There is no in-place migration path for the v1 cycle —
-/// rebuilds are cheap (&lt; 60 s for this repo) and guaranteed-correct.
+/// it from scratch. There is no in-place migration path — rebuilds are cheap
+/// (&lt; 60 s for this repo) and guaranteed-correct.
 /// </para>
 /// </remarks>
 public static class SqliteSchema
 {
     /// <summary>Current schema version. Stored in <c>meta.schema_version</c>.</summary>
-    public const int Version = 1;
+    /// <remarks>
+    /// <para>
+    /// Version history:
+    /// </para>
+    /// <list type="bullet">
+    ///   <item><description>1 — initial schema: <c>code_fts</c> stored full content.</description></item>
+    ///   <item><description>2 — <c>code_fts</c> becomes contentless (<c>content = ''</c>);
+    ///   snippet text is rehydrated from disk at query time. See
+    ///   <c>Indexed-Size-Reduction-SafeNearTerm-Plan.md §Workstream C</c>.</description></item>
+    /// </list>
+    /// </remarks>
+    public const int Version = 2;
 
     /// <summary>
-    /// Full DDL executed on a fresh <c>index.db</c>. Matches the layout in
-    /// <c>Indexed-Architecture-Proposal.md §4.2</c> verbatim.
+    /// Full DDL executed on a fresh <c>index.db</c>.
     /// </summary>
     public const string Ddl = """
         CREATE TABLE files (
@@ -41,6 +52,8 @@ public static class SqliteSchema
 
         CREATE VIRTUAL TABLE code_fts USING fts5(
             content,
+            content = '',
+            contentless_delete = 1,
             tokenize = 'trigram'
         );
 

@@ -37,8 +37,12 @@ public sealed class SqliteIndexTests : IDisposable
     }
 
     [Fact]
-    public async Task UpsertAndQuery_RoundTripsContent()
+    public async Task UpsertAndQuery_RoundTripsMetadata()
     {
+        // Schema v2: code_fts is contentless. The trigram index still produces
+        // candidates via MATCH, but the content itself is not round-trippable
+        // from the index — callers rehydrate from the working tree. Here we
+        // assert the candidate row surfaces and carries the sha we wrote.
         await using var index = SqliteIndex.OpenOrCreate(DbPath);
         var sha = new byte[32];
         Random.Shared.NextBytes(sha);
@@ -62,7 +66,7 @@ public sealed class SqliteIndexTests : IDisposable
         var rows = await index.GetFilesAsync(candidates, default);
         Assert.Single(rows);
         Assert.Equal("src/foo.cs", rows[0].Path);
-        Assert.Contains("Alpha", rows[0].Content);
+        Assert.Equal(sha, rows[0].Sha256);
     }
 
     [Fact]

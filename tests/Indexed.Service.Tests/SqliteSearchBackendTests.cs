@@ -45,7 +45,10 @@ public sealed class SqliteSearchBackendTests : IDisposable
         var indexer = new FullScanIndexer(repo, _index);
         indexer.RunAsync(progress: null, CancellationToken.None).GetAwaiter().GetResult();
 
-        _backend = new SqliteSearchBackend(_index, () => new Freshness(null, "abc", 0, null, false));
+        _backend = new SqliteSearchBackend(
+            _index,
+            () => new Freshness(null, "abc", 0, null, false),
+            new FileContentProvider(repoPath));
     }
 
     public void Dispose()
