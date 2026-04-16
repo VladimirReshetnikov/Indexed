@@ -21,9 +21,16 @@ public sealed record DaemonOptions
     public required string RepoRoot { get; init; }
 
     /// <summary>
-    /// Override for the <c>%APPDATA%\Indexed</c> parent of the per-repo
-    /// directory. <c>null</c> uses the real roaming profile.
+    /// Override for the <c>%LOCALAPPDATA%\Indexed</c> parent of the per-repo
+    /// directory. <c>null</c> uses the real local profile.
     /// </summary>
+    /// <remarks>
+    /// The option is named <see cref="AppDataBase"/> for API compatibility;
+    /// the default is resolved from
+    /// <see cref="Environment.SpecialFolder.LocalApplicationData"/>
+    /// (non-roaming) because <c>index.db</c> is a large, machine-specific
+    /// derived artifact.
+    /// </remarks>
     public string? AppDataBase { get; init; }
 
     /// <summary>

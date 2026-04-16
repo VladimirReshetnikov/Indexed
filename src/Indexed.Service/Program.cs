@@ -10,11 +10,11 @@ using Microsoft.Extensions.Logging;
 // Accepts a single positional argument (the repository root). Additional
 // switches:
 //   --idle-timeout-seconds <n>   Override the 30-minute idle-exit window.
-//   --app-data <dir>             Override %APPDATA%\Indexed for tests.
+//   --app-data <dir>             Override %LOCALAPPDATA%\Indexed for tests.
 //
-// On successful startup writes %APPDATA%\Indexed\<repoId>\daemon.json with
-// the bound port and shutdown token, then blocks on the HTTP request loop
-// until cancellation or an authenticated /shutdown request.
+// On successful startup writes %LOCALAPPDATA%\Indexed\<repoId>\daemon.json
+// with the bound port and shutdown token, then blocks on the HTTP request
+// loop until cancellation or an authenticated /shutdown request.
 
 var repoRoot = args.Length > 0 ? args[0] : Directory.GetCurrentDirectory();
 var idleSeconds = (int)TimeSpan.FromMinutes(30).TotalSeconds;

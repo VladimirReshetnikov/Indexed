@@ -53,7 +53,7 @@ internal sealed class DaemonClient : IDisposable
     /// <see cref="DaemonLauncher"/>.
     /// </summary>
     /// <param name="repoRoot">Repository working-tree root.</param>
-    /// <param name="appData">Override for <c>%APPDATA%\Indexed</c>.</param>
+    /// <param name="appData">Override for <c>%LOCALAPPDATA%\Indexed</c>.</param>
     /// <param name="startupTimeout">How long to wait for the daemon to become ready (default 120 s).</param>
     /// <param name="indexExcludeGlobs">Additional index-time exclude globs forwarded on launch.</param>
     /// <param name="noDefaultExcludes">

@@ -36,7 +36,7 @@ internal static class DaemonLauncher
     /// <param name="repoRoot">Working-tree root to index.</param>
     /// <param name="daemonJsonPath">Path to watch for the bound port-file.</param>
     /// <param name="timeout">How long to wait for the daemon to become ready.</param>
-    /// <param name="appData">Optional override of <c>%APPDATA%\Indexed</c>.</param>
+    /// <param name="appData">Optional override of <c>%LOCALAPPDATA%\Indexed</c>.</param>
     /// <param name="indexExcludeGlobs">Additional index-time exclude globs forwarded on launch.</param>
     /// <param name="noDefaultExcludes">
     /// When <c>true</c>, passes <c>--no-default-excludes</c> so the daemon

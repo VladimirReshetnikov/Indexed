@@ -47,7 +47,8 @@ Primary consumers are AI coding agents. The service is designed for:
 │  │  │  RegexTrigrams   FullScanIndexer   DebouncingEventQueue │  │   │
 │  │  │  TextDecoder     PathGlob          RepoWatcher          │  │   │
 │  │  │  LanguageGuess   MatchExtraction   HeadPoller           │  │   │
-│  │  │                                    ReconciliationSched  │  │   │
+│  │  │  FileContent     ExcludeFilter     IndexOptimizer       │  │   │
+│  │  │  Provider                          ReconciliationSched  │  │   │
 │  │  └─────────────────────────────────────────────────────────┘  │   │
 │  └───────────────────────────────────────────────────────────────┘   │
 │                                                                      │
@@ -108,13 +109,13 @@ repoId = SHA1( absolutePath(repoRoot) + "\0" + firstCommitSha )[0:12]
 The first-commit SHA anchors identity across worktree moves. State lives under:
 
 ```
-%APPDATA%\Indexed\<repoId>\
+%LOCALAPPDATA%\Indexed\<repoId>\
     daemon.json     Port, PID, startup time, shutdown token
     index.db        SQLite database: files, FTS5 tables, metadata
     logs/           Daily-rotated structured logs
 ```
 
-### 3.2 SQLite schema (version 1)
+### 3.2 SQLite schema (version 2)
 
 One database per repository. WAL journal mode for concurrent reads during writes.
 
@@ -131,15 +132,19 @@ CREATE TABLE files (
 );
 CREATE INDEX files_path_glob ON files(path);
 
--- Code index: trigram tokenizer for substring/regex search
--- One row per file, rowid = file_id
+-- Code index: contentless trigram FTS5 (schema v2)
+-- Rowid = file_id; the posting list is kept, the text itself is not stored.
+-- Snippets are rehydrated from the working tree at query time via
+-- FileContentProvider.
 CREATE VIRTUAL TABLE code_fts USING fts5(
     content,
+    content = '',
+    contentless_delete = 1,
     tokenize = 'trigram'
 );
 
 -- Prose index: porter+unicode61 tokenizer for stemmed word search
--- One row per extracted prose span (Stage 3)
+-- One row per extracted prose span (Stage 3). Content stored.
 CREATE VIRTUAL TABLE prose_fts USING fts5(
     content,
     kind         UNINDEXED,
@@ -160,12 +165,19 @@ Meta keys:
 
 | Key | Value |
 |-----|-------|
-| `schema_version` | `"1"` |
+| `schema_version` | `"2"` |
 | `repo_id` | 12-hex-char repository identifier |
 | `indexed_head` | 40-char SHA of the last fully indexed HEAD commit |
 | `last_full_scan_at` | Unix timestamp of last full scan completion |
 
 Schema changes are breaking: `SqliteIndex` detects version mismatch, deletes `index.db`, and recreates from scratch.
+
+Schema version history:
+
+| Version | Change | Rationale |
+|---------|--------|-----------|
+| 1 | Initial: `code_fts` stored full content. | — |
+| 2 | `code_fts` becomes contentless (`content = ''`, `contentless_delete = 1`). | Cuts index size by ~source tree size. Requires SQLite 3.43+ for `contentless_delete`. Snippets come from disk at query time. |
 
 ### 3.3 File set
 
@@ -182,7 +194,14 @@ A file is excluded from indexing if any of:
 1. Size exceeds 50 MiB (`MaxIndexableFileBytes`).
 2. First 8 KiB contains a NUL byte (binary heuristic).
 3. `git check-attr binary` reports `binary: set`.
-4. Path matches the daemon's exclude glob list (defaults: `**/node_modules/**`, `**/bin/**`, `**/obj/**`, `**/*.min.js`, `**/*.map`).
+4. Path matches the daemon's exclude glob list.
+
+Exclude globs are composed at daemon startup from two sources:
+
+- **Built-in default list** (`ExcludeFilter.DefaultBinaryAdjacentGlobs`, enabled unless `--no-default-excludes`): lockfiles (`package-lock.json`, `yarn.lock`, `pnpm-lock.yaml`, `Cargo.lock`, `Gemfile.lock`, `composer.lock`, `poetry.lock`), minified JS/CSS bundles (`*.min.js`, `*.min.css`), source maps (`*.map`), generated C# (`*.Designer.cs`, `*.g.cs`, `*.g.i.cs`), and binary-adjacent tooling noise. Cuts the FTS5 trigram index substantially on repos that check in any of these (see `Indexed-Size-Reduction-SafeNearTerm-Plan.md §Workstream A`).
+- **User-supplied globs** via `--exclude-index <glob>` (repeatable).
+
+The two lists are concatenated (defaults first) and applied uniformly by the full-scan indexer, the incremental indexer, and the repo watcher, so a newly dropped lockfile is ignored at every entry point.
 
 ## 4. Indexing pipeline
 
@@ -272,12 +291,19 @@ A Russ Cox-style analyzer in four components:
 ### 5.3 Code query execution (`CodeQueryExecutor`)
 
 1. If the plan has an FTS5 expression: query `code_fts` for candidate `file_id` values.
-2. If a path glob is specified: filter candidates against `files.path`.
-3. Fetch file content in batches of 256 files.
-4. For each candidate: run the compiled `Regex` (regex mode) or `string.IndexOf` (literal mode) against the content.
-5. Extract line, column, byte offset, context lines via `MatchExtraction`.
-6. Apply per-file cap (`maxMatchesPerFile`, default 20) and global cap (`maxMatches`, default 200).
-7. Enforce timeout (`timeoutMs`, default 2000 ms).
+2. Fetch `(file_id, path, sha256)` rows in batches of 256 files. No content column — schema v2 is contentless.
+3. If a path glob is specified: filter candidates against `files.path`.
+4. For each candidate: read the file from disk via `FileContentProvider` (rooted at the repo root). If the file is missing, unreadable, or oversize (> `MaxIndexableFileBytes`), drop the candidate and enqueue a `FileChanged` repair so the incremental indexer converges.
+5. Run the compiled `Regex` (regex mode) or `string.IndexOf` (literal mode) against the live on-disk content.
+6. Extract line, column, byte offset, context lines via `MatchExtraction`.
+7. Apply per-file cap (`maxMatchesPerFile`, default 20) and global cap (`maxMatches`, default 200).
+8. Enforce timeout (`timeoutMs`, default 2000 ms).
+
+The FTS5 posting list is a *candidate oracle*, not the source of truth for match text. Three staleness classes are bounded:
+
+- **Stale candidate** (index ahead of disk edits): the disk scan naturally returns zero hits for content that no longer exists. Caller sees fewer matches; the indexer catches up.
+- **Missing file** (index references a deleted/renamed file): executor drops the candidate and enqueues `FileChanged(path)` so the incremental indexer deletes the row on its next batch.
+- **Fresh edit** (file modified after the last successful index): the scanner operates on the new content; trigrams that previously matched may no longer be present, or vice versa. No regression from v1.
 
 ### 5.4 Search modes
 
@@ -293,19 +319,21 @@ A Russ Cox-style analyzer in four components:
 
 1. **Open repository**: `GitRepository.Open(repoRoot)` walks up to find `.git`.
 2. **Compute repo ID**: `SHA1(abspath + "\0" + firstCommitSha)[0:12]`.
-3. **Resolve paths**: `%APPDATA%\Indexed\<repoId>\{daemon.json, index.db, logs/}`.
+3. **Resolve paths**: `%LOCALAPPDATA%\Indexed\<repoId>\{daemon.json, index.db, logs/}`. The local (non-roaming) application data folder is used because `index.db` is a machine-specific, reconstructible-from-source derived artifact that must not replicate across devices.
 4. **Acquire mutex**: `Global\Indexed-<repoId>` named mutex (Windows). Handles `AbandonedMutexException` from crashed predecessors.
 5. **Bind listener**: `TcpListener` on `127.0.0.1:0` for OS-assigned ephemeral port; transfer to `HttpListener`.
 6. **Open index**: `SqliteIndex.OpenOrCreate(index.db)`. On corruption or schema mismatch: delete and recreate.
 7. **Full scan** (if index empty): run `FullScanIndexer`.
-8. **Start incremental pipeline**:
-   - `DebouncingEventQueue` (event broker)
+8. **Construct the content provider**: `FileContentProvider` rooted at the repo. Contentless FTS5 means the search backend rehydrates match text from disk, not from the index.
+9. **Start incremental pipeline**:
+   - `DebouncingEventQueue` (event broker; also receives repair events from the query executor)
    - `IncrementalIndexer` (background worker)
    - `RepoWatcher` (FSW)
    - `HeadPoller` (1-second timer)
    - `ReconciliationScheduler` (5-minute timer)
-9. **Write `daemon.json`**: atomic temp-file + rename. Contains port, PID, repo info, shutdown token.
-10. **Start idle-exit timer**: fires callback after 30 minutes of no activity.
+10. **Start the background optimizer** (`IndexOptimizer`): a 15-minute timer (configurable via `DaemonOptions.OptimizerInterval`) that runs bounded FTS5 segment merges. Each tick calls `SqliteIndex.RunFts5MergeAsync(pageBudget)` (default 512 pages) — enough to reclaim fragmentation from recent batch commits without stalling the writer. Skipped entirely when the writer has been idle since the previous tick.
+11. **Write `daemon.json`**: atomic temp-file + rename. Contains port, PID, repo info, shutdown token.
+12. **Start idle-exit timer**: fires callback after 30 minutes of no activity.
 
 ### 6.2 Request loop
 
@@ -339,10 +367,11 @@ Staleness rule: `isStale = (pendingFileCount > 0) || (indexedHead != currentHead
 3. Delete `daemon.json`.
 4. Dispose idle-exit timer.
 5. Stop FSW, HEAD poller, reconciliation scheduler.
-6. Drain the incremental indexer (wait for current batch to commit or abort).
-7. Dispose the event queue.
-8. Dispose `SqliteIndex` (runs `PRAGMA wal_checkpoint(TRUNCATE)` to bound WAL file size).
-9. Release and dispose the singleton mutex.
+6. Stop the `IndexOptimizer` (fires one final generous merge — `pageBudget = 1024` — to consolidate the segment tree before the WAL checkpoint).
+7. Drain the incremental indexer (wait for current batch to commit or abort).
+8. Dispose the event queue.
+9. Dispose `SqliteIndex` (runs `PRAGMA wal_checkpoint(TRUNCATE)` to bound WAL file size).
+10. Release and dispose the singleton mutex.
 
 ### 6.4 Idle-exit timer (`IdleExitTimer`)
 
@@ -354,9 +383,9 @@ Sleep-resilient timer using monotonic `Environment.TickCount64`:
 
 ## 7. Concurrency model
 
-- **Single writer**: The `IncrementalIndexer` background task is the sole writer to `SqliteIndex` after startup. No concurrent indexing.
+- **Single-writer serialization**: `IncrementalIndexer` and `IndexOptimizer` are the only writers. Both acquire `SqliteIndex`'s writer semaphore via `BeginWriteAsync`, so their transactions are strictly serialized even though they run on independent timers. A tick from the optimizer cannot interleave with an indexer batch.
 - **Concurrent readers**: WAL-mode readers proceed concurrently with the writer. Each `/search` query opens a short-lived read transaction that sees a consistent snapshot.
-- **Thread-safe event ingestion**: `DebouncingEventQueue.Enqueue()` is safe to call from any thread (FSW callbacks, timer callbacks, HTTP threads).
+- **Thread-safe event ingestion**: `DebouncingEventQueue.Enqueue()` is safe to call from any thread (FSW callbacks, timer callbacks, HTTP threads, and the query executor when it produces repair events for missing files).
 - **Eventual consistency**: `freshness.isStale` tells callers whether the index is behind. There is no query-time wait for indexing to catch up.
 
 ## 8. Git process management (`GitProcess`)
@@ -429,7 +458,7 @@ Both delete and upsert scopes in `IncrementalIndexer` wrap their work in `try/ca
 - **Shutdown token**: `/shutdown` requires `X-Indexed-Shutdown-Token` header matching a 32-byte random token generated at startup and written to `daemon.json`.
 - **Path containment**: Only reads files under the repo root.
 - **No outbound network**: No remote connections.
-- **Read-only repo access**: Files opened read-only; writable state under `%APPDATA%\Indexed\<repoId>\`.
+- **Read-only repo access**: Files opened read-only; writable state under `%LOCALAPPDATA%\Indexed\<repoId>\`.
 
 ## 13. Performance targets
 
@@ -440,23 +469,23 @@ Both delete and upsert scopes in `IncrementalIndexer` wrap their work in `try/ca
 | Regex with weak trigrams (`..foo..`) | ≤ 250 ms |
 | Cold startup with warm `index.db` | ≤ 2 s |
 | Cold rebuild from scratch | ≤ 60 s for this repo |
-| Index size | ≤ 3× indexed source bytes |
+| Index size | ≤ 1.2× indexed source bytes (contentless FTS5 + default excludes + idle-time optimizer) |
 | Single-file save → queryable | ≤ 2 s |
 | Branch switch (50-file diff) → queryable | ≤ 5 s |
 
 ## 14. Test coverage
 
-184 tests across 5 test projects:
+313 tests across 5 test projects:
 
 | Test project | Tests | Coverage |
 |-------------|-------|----------|
 | `Indexed.Abstractions.Tests` | 32 | JSON serialization round-trips for all DTOs |
 | `Indexed.Git.Tests` | 26 | Diff-tree parsing, untracked file listing, index mtime, rename handling |
-| `Indexed.Core.Tests` | 71 | SQLite operations, full scan, incremental indexer (FSW, HEAD, reconciliation), query planning, regex trigrams, debouncing, text decoder, path glob |
-| `Indexed.Service.Tests` | 25 | HTTP contract, daemon info, idle-exit timer, repo ID |
-| `Indexed.Cli.Tests` | 30 | Argument parsing, output formatting |
+| `Indexed.Core.Tests` | 165 | SQLite operations (incl. contentless FTS5 shadow-table invariants), full scan, incremental indexer (FSW, HEAD, reconciliation), query planning, regex trigrams, debouncing, text decoder, path glob, exclude filter, index optimizer, disk-read snippet rehydration |
+| `Indexed.Service.Tests` | 54 | HTTP contract, daemon info, idle-exit timer, repo ID, default-exclude wiring, optimizer integration |
+| `Indexed.Cli.Tests` | 36 | Argument parsing, output formatting, exclude-default flag plumbing |
 
-Integration tests in `Indexed.Core.Tests` and `Indexed.Git.Tests` spin up real git repositories in temp directories and exercise end-to-end scenarios.
+Integration tests in `Indexed.Core.Tests`, `Indexed.Git.Tests`, and `Indexed.Service.Tests` spin up real git repositories in temp directories and exercise end-to-end scenarios.
 
 ## 15. Future work (Stage 3 and beyond)
 

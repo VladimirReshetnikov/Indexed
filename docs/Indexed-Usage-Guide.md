@@ -280,7 +280,7 @@ X-Indexed-Shutdown-Token: <base64-encoded-token-from-daemon.json>
 ### 4.1 Daemon discovery
 
 1. Compute the repo ID: `SHA1(abspath(repoRoot) + "\0" + firstCommitSha)[0:12]`.
-2. Read `%APPDATA%\Indexed\<repoId>\daemon.json`.
+2. Read `%LOCALAPPDATA%\Indexed\<repoId>\daemon.json`.
 3. If the file exists, probe `GET /status` on the advertised port.
 4. If the probe succeeds, use the daemon. If it fails or the file is missing, launch the daemon.
 
@@ -317,7 +317,7 @@ The daemon accepts these command-line arguments (via `Indexed.Service` `Program.
 |----------|---------|-------------|
 | `<repo-root>` | (required) | Path to the git repository root |
 | `--idle-timeout-seconds` | 1800 (30 min) | Seconds of inactivity before daemon exits |
-| `--app-data` | `%APPDATA%\Indexed` | Base directory for state files |
+| `--app-data` | `%LOCALAPPDATA%\Indexed` | Base directory for state files |
 | `--exclude-index` | (none) | Glob patterns to exclude from indexing (repeatable) |
 | `--no-default-excludes` | off | Do not apply the built-in default exclude list |
 
@@ -383,7 +383,7 @@ default list — they are not mutually exclusive.
 ## 6. Data directory layout
 
 ```
-%APPDATA%\Indexed\
+%LOCALAPPDATA%\Indexed\
     <repoId>/
         daemon.json         # Port, PID, startup time, shutdown token
         index.db            # SQLite database (WAL mode)
@@ -410,22 +410,40 @@ Written atomically via temp-file + rename. Deleted on graceful shutdown. A stale
 
 ### 6.2 `index.db` structure
 
-SQLite database in WAL mode. Contains:
+SQLite database in WAL mode. Contains (schema version 2):
 
 | Table | Content |
 |-------|---------|
 | `files` | File metadata: path, mtime, size, SHA-256, language, indexed timestamp |
-| `code_fts` | FTS5 virtual table with trigram tokenizer; one row per file |
+| `code_fts` | FTS5 virtual table with trigram tokenizer; **contentless** (`content = ''`, `contentless_delete = 1`). Only the posting list is stored — match snippets are read from the working tree at query time. |
 | `prose_fts` | FTS5 virtual table with porter+unicode61 tokenizer (Stage 3) |
 | `meta` | Key-value metadata: schema version, repo ID, indexed HEAD, last scan time |
 
 Inspect with `sqlite3`:
 
 ```bash
-sqlite3 "%APPDATA%\Indexed\<repoId>\index.db" "SELECT * FROM meta;"
-sqlite3 "%APPDATA%\Indexed\<repoId>\index.db" "SELECT count(*) FROM files;"
-sqlite3 "%APPDATA%\Indexed\<repoId>\index.db" "SELECT path FROM files LIMIT 20;"
+sqlite3 "%LOCALAPPDATA%\Indexed\<repoId>\index.db" "SELECT * FROM meta;"
+sqlite3 "%LOCALAPPDATA%\Indexed\<repoId>\index.db" "SELECT count(*) FROM files;"
+sqlite3 "%LOCALAPPDATA%\Indexed\<repoId>\index.db" "SELECT path FROM files LIMIT 20;"
 ```
+
+### 6.3 Schema upgrades — one-time rebuild
+
+On first start after an upgrade that bumps the schema version, the daemon
+detects the mismatch, deletes the existing `index.db` (and its `-wal` /
+`-shm` sidecars), and performs a full scan from scratch. The rebuild is
+typically under a minute for a small repo and a few minutes for a large one.
+No user action is required; only the first `/status` after upgrade is slow.
+
+### 6.4 Background index compaction
+
+The daemon runs a lightweight `IndexOptimizer` that periodically issues a
+bounded FTS5 segment merge to reclaim fragmentation from incremental updates.
+By default this is a 15-minute timer with a 512-page budget per tick; on
+graceful shutdown it runs one final 1024-page merge before the WAL
+checkpoint. The optimizer is fully transparent — it shares the same
+writer-serialization semaphore as the incremental indexer, so merges can
+never interleave with batch commits.
 
 ## 7. Troubleshooting
 
@@ -436,8 +454,8 @@ sqlite3 "%APPDATA%\Indexed\<repoId>\index.db" "SELECT path FROM files LIMIT 20;"
 **Checks**:
 1. Is `git` on PATH? The daemon fails fast if `git` is not available.
 2. Is the current directory inside a git repository? Run `git rev-parse --show-toplevel`.
-3. Is another daemon already running? Check `%APPDATA%\Indexed\<repoId>\daemon.json` for a stale PID. Kill the process or delete the file.
-4. Check logs at `%APPDATA%\Indexed\<repoId>\logs\`.
+3. Is another daemon already running? Check `%LOCALAPPDATA%\Indexed\<repoId>\daemon.json` for a stale PID. Kill the process or delete the file.
+4. Check logs at `%LOCALAPPDATA%\Indexed\<repoId>\logs\`.
 
 ### Stale results
 
@@ -457,9 +475,9 @@ sqlite3 "%APPDATA%\Indexed\<repoId>\index.db" "SELECT path FROM files LIMIT 20;"
 
 ```bash
 idx stop
-del "%APPDATA%\Indexed\<repoId>\index.db"
-del "%APPDATA%\Indexed\<repoId>\index.db-wal"
-del "%APPDATA%\Indexed\<repoId>\index.db-shm"
+del "%LOCALAPPDATA%\Indexed\<repoId>\index.db"
+del "%LOCALAPPDATA%\Indexed\<repoId>\index.db-wal"
+del "%LOCALAPPDATA%\Indexed\<repoId>\index.db-shm"
 idx status   # restarts daemon and triggers full scan
 ```
 

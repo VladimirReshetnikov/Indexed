@@ -20,7 +20,7 @@ namespace Indexed.Service;
 /// (<c>POST /shutdown</c> today; <c>POST /rescan</c> when it gets side
 /// effects). Only processes that can read the file — enforced by Windows
 /// filesystem ACLs granting the owning user exclusive access to
-/// <c>%APPDATA%</c> — obtain the token. This is stronger than a
+/// <c>%LOCALAPPDATA%</c> — obtain the token. This is stronger than a
 /// loopback-only check, which does not distinguish the daemon's owner from
 /// a different local user on multi-user workstations.
 /// </para>

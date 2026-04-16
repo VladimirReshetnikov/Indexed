@@ -18,7 +18,7 @@ namespace Indexed.Service;
 /// specific history, and a rewritten root is effectively a new repository.
 /// </para>
 /// <para>
-/// Uses: single-instance mutex name, <c>%APPDATA%\Indexed\&lt;repoId&gt;\</c>
+/// Uses: single-instance mutex name, <c>%LOCALAPPDATA%\Indexed\&lt;repoId&gt;\</c>
 /// directory segment, <see cref="Indexed.Abstractions.StatusResponse.RepoId"/>
 /// field.
 /// </para>

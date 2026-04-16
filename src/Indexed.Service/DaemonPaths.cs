@@ -11,15 +11,22 @@ namespace Indexed.Service;
 /// Root layout (Windows):
 /// </para>
 /// <code>
-/// %APPDATA%\Indexed\&lt;repoId&gt;\
+/// %LOCALAPPDATA%\Indexed\&lt;repoId&gt;\
 ///     daemon.json
 ///     logs\indexed-YYYYMMDD.log
 ///     index.db            (added in S2)
 /// </code>
 /// <para>
+/// <c>%LOCALAPPDATA%</c> (<see cref="Environment.SpecialFolder.LocalApplicationData"/>)
+/// is deliberate: <c>index.db</c> is a potentially large, machine-specific,
+/// reconstructible-from-source derived artifact, and must not roam between
+/// devices. Roaming it (via <c>%APPDATA%</c>) would inflate sync traffic and
+/// race with per-machine indexer state.
+/// </para>
+/// <para>
 /// Tests override the base path by passing <paramref name="baseDirectory"/>
 /// to <see cref="ForRepo"/>. Production code passes the empty string (default)
-/// so the class resolves <c>%APPDATA%\Indexed</c> from the environment.
+/// so the class resolves <c>%LOCALAPPDATA%\Indexed</c> from the environment.
 /// </para>
 /// </remarks>
 public sealed class DaemonPaths
@@ -33,7 +40,7 @@ public sealed class DaemonPaths
     }
 
     /// <summary>
-    /// Per-repo root (<c>%APPDATA%\Indexed\&lt;repoId&gt;</c>). Created by
+    /// Per-repo root (<c>%LOCALAPPDATA%\Indexed\&lt;repoId&gt;</c>). Created by
     /// <see cref="EnsureCreated"/>.
     /// </summary>
     public string RootDirectory { get; }
@@ -58,7 +65,7 @@ public sealed class DaemonPaths
     /// </param>
     /// <param name="baseDirectory">
     /// Override the parent of the per-repo directory. Pass <c>null</c> or
-    /// empty to use <c>%APPDATA%\Indexed</c>; pass a temp directory in tests.
+    /// empty to use <c>%LOCALAPPDATA%\Indexed</c>; pass a temp directory in tests.
     /// </param>
     public static DaemonPaths ForRepo(string repoId, string? baseDirectory = null)
     {
@@ -66,7 +73,7 @@ public sealed class DaemonPaths
             throw new ArgumentException("repoId must be non-empty", nameof(repoId));
 
         var parent = string.IsNullOrEmpty(baseDirectory)
-            ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Indexed")
+            ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Indexed")
             : baseDirectory;
 
         return new DaemonPaths(Path.Combine(parent, repoId));

@@ -36,7 +36,7 @@ namespace Indexed.Abstractions;
 /// <param name="RepoId">
 /// Twelve-hex-character repository identifier,
 /// <c>SHA1(abspath + "\0" + firstCommitSha)[:12]</c>. Stable across worktree
-/// moves; the CLI uses this to locate <c>%APPDATA%\Indexed\&lt;repoId&gt;\</c>.
+/// moves; the CLI uses this to locate <c>%LOCALAPPDATA%\Indexed\&lt;repoId&gt;\</c>.
 /// </param>
 /// <param name="StartedAt">UTC time the daemon process entered its run loop.</param>
 /// <param name="Freshness">Current index-staleness snapshot.</param>
