@@ -76,10 +76,11 @@ namespace Indexed.Abstractions;
 /// Ordering policy for <see cref="SearchResponse.Matches"/>.
 /// </param>
 /// <param name="TimeoutMs">
-/// Soft deadline in milliseconds. A request that exceeds this budget returns
-/// whatever was found so far with <c>truncated = true</c>, or an
-/// <see cref="ErrorResponse"/> with
-/// <see cref="IndexedErrorCode.TimeoutExceeded"/> if nothing was found yet.
+/// Hard deadline in milliseconds. When the budget elapses, the request fails
+/// with <see cref="IndexedErrorCode.TimeoutExceeded"/> and returns no matches
+/// — callers that need partial-result behavior must use a smaller
+/// <see cref="MaxMatches"/>/<see cref="MaxMatchesPerFile"/> cap instead.
+/// Partial-result rescue of accumulated matches is planned for Stage 3.
 /// </param>
 /// <example>
 /// <code>

@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics;
 using System.Net.Http;
 using System.Net.Http.Json;
 using System.Text.Json;
@@ -75,10 +76,19 @@ internal sealed class DaemonClient : IDisposable
         paths.EnsureCreated();
 
         var info = DaemonInfo.TryRead(paths.DaemonJsonPath);
-        if (info is not null && await PingAsync(info, cancellationToken).ConfigureAwait(false))
-            return Build(info);
+        if (info is not null)
+        {
+            // Adoption probe: quick /status first. If the daemon is simply
+            // busy (long-running search, post-startup scan storm) the 2 s
+            // timeout can expire even though the process is healthy; verify
+            // liveness via the PID before orphaning and retry with a longer
+            // deadline. Only delete daemon.json when the PID is known dead
+            // or a generous retry still fails.
+            if (await PingWithLivenessAsync(info, cancellationToken).ConfigureAwait(false))
+                return Build(info);
 
-        DaemonInfo.TryDelete(paths.DaemonJsonPath);
+            DaemonInfo.TryDelete(paths.DaemonJsonPath);
+        }
 
         // Cold start includes the initial full scan (proposal §14 targets
         // ≤60 s for this repo). Give the daemon generous headroom here; the
@@ -95,7 +105,7 @@ internal sealed class DaemonClient : IDisposable
         if (launched is null)
             throw new InvalidOperationException("daemon failed to start within the configured timeout");
 
-        if (!await PingAsync(launched, cancellationToken).ConfigureAwait(false))
+        if (!await PingAsync(launched, TimeSpan.FromSeconds(10), cancellationToken).ConfigureAwait(false))
             throw new InvalidOperationException("daemon started but is not responding to /status");
 
         return Build(launched);
@@ -162,20 +172,97 @@ internal sealed class DaemonClient : IDisposable
         return response.IsSuccessStatusCode;
     }
 
-    private static async Task<bool> PingAsync(DaemonInfo info, CancellationToken ct)
+    /// <summary>
+    /// Ping the daemon at <paramref name="info"/> with a short-first,
+    /// long-second retry policy gated by a PID-liveness check. Returns
+    /// <c>true</c> only when the daemon answers <c>/status</c> with 2xx.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Ordering: (1) short 2 s ping — fast path for healthy daemons; (2) if
+    /// that fails, inspect the OS process table for <c>info.Pid</c>; a dead
+    /// PID means the daemon.json is stale and we give up immediately so the
+    /// caller can relaunch; (3) if the PID is alive (or liveness cannot be
+    /// determined — e.g. cross-user ACL denial), retry once with a 10 s
+    /// deadline to tolerate transient load spikes.
+    /// </para>
+    /// <para>
+    /// PID reuse: on Windows and POSIX the OS does recycle pids, so we also
+    /// require the process's <c>StartTime</c> to be at or before the
+    /// <c>StartedAt</c> recorded in daemon.json. A newer process under the
+    /// same pid cannot match. When <c>StartTime</c> is unreadable
+    /// (<see cref="InvalidOperationException"/> on exited processes, ACL
+    /// denial) we conservatively treat the PID as alive so a legitimately
+    /// healthy daemon is not evicted.
+    /// </para>
+    /// </remarks>
+    private static async Task<bool> PingWithLivenessAsync(DaemonInfo info, CancellationToken ct)
+    {
+        if (await PingAsync(info, TimeSpan.FromSeconds(2), ct).ConfigureAwait(false))
+            return true;
+
+        if (!IsDaemonPidAlive(info))
+            return false;
+
+        // Process is alive — give it a longer window to answer. This covers
+        // the "daemon is mid-scan / holding a long write-lock / GC pause"
+        // case where the short probe would spuriously orphan a live daemon.
+        return await PingAsync(info, TimeSpan.FromSeconds(10), ct).ConfigureAwait(false);
+    }
+
+    private static async Task<bool> PingAsync(DaemonInfo info, TimeSpan timeout, CancellationToken ct)
     {
         try
         {
             using var probe = new HttpClient
             {
                 BaseAddress = new Uri($"http://127.0.0.1:{info.Port}/"),
-                Timeout = TimeSpan.FromSeconds(2),
+                Timeout = timeout,
             };
             using var response = await probe.GetAsync("status", ct).ConfigureAwait(false);
             return response.IsSuccessStatusCode;
         }
         catch (HttpRequestException) { return false; }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested) { return false; }
+    }
+
+    /// <summary>
+    /// Return <c>true</c> when the OS reports a running process at
+    /// <c>info.Pid</c> whose start time is consistent with the recorded
+    /// <c>info.StartedAt</c> (i.e. not a PID-recycle false positive).
+    /// </summary>
+    /// <remarks>
+    /// Errors from <see cref="Process.GetProcessById(int)"/> (dead pid) yield
+    /// <c>false</c>. Errors reading <see cref="Process.StartTime"/> (ACL,
+    /// exited-during-check) yield <c>true</c> — the conservative choice
+    /// favors keeping a potentially-live daemon over evicting it.
+    /// </remarks>
+    private static bool IsDaemonPidAlive(DaemonInfo info)
+    {
+        Process? process = null;
+        try
+        {
+            process = Process.GetProcessById(info.Pid);
+            if (process.HasExited) return false;
+
+            try
+            {
+                // A PID recycled after the daemon died will carry a StartTime
+                // strictly later than the daemon.json StartedAt. Allow a small
+                // grace window (1 second) for clock skew between the daemon's
+                // DateTimeOffset.UtcNow and the OS process-start timestamp.
+                var osStart = new DateTimeOffset(process.StartTime.ToUniversalTime(), TimeSpan.Zero);
+                return osStart <= info.StartedAt + TimeSpan.FromSeconds(1);
+            }
+            catch (InvalidOperationException) { return true; }
+            catch (System.ComponentModel.Win32Exception) { return true; }
+        }
+        catch (ArgumentException) { return false; } // no such pid
+        catch (InvalidOperationException) { return false; } // process exited between checks
+        finally
+        {
+            process?.Dispose();
+        }
     }
 
     public void Dispose() => _http.Dispose();

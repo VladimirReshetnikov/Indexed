@@ -204,4 +204,69 @@ public sealed class CodeQueryExecutorTests : IDisposable
         Assert.Equal(2, result.Matches.Count);
         Assert.True(result.Truncated);
     }
+
+    [Fact]
+    public async Task KindFilter_WithoutCode_ReturnsNoMatches()
+    {
+        // Stage 2 emits only SpanKind.Code. A KindFilter that doesn't include
+        // Code should short-circuit to zero matches — the previous executor
+        // silently ignored KindFilter and returned every hit, contradicting
+        // the DTO contract.
+        await using var index = await SeedAsync(new[]
+        {
+            ("a.cs", "needle here\n"),
+        });
+
+        var request = new SearchRequest(
+            "needle",
+            Mode: QueryMode.Code,
+            KindFilter: new[] { SpanKind.XmlDoc });
+        var plan = CodeQueryPlanner.Build(request);
+        var result = await NewExecutor(index).ExecuteAsync(request, plan, default);
+
+        Assert.Empty(result.Matches);
+    }
+
+    [Fact]
+    public async Task KindFilter_IncludingCode_ReturnsMatches()
+    {
+        // Complementary: a filter that *does* include Code should not mask
+        // valid hits.
+        await using var index = await SeedAsync(new[]
+        {
+            ("a.cs", "needle here\n"),
+        });
+
+        var request = new SearchRequest(
+            "needle",
+            Mode: QueryMode.Code,
+            KindFilter: new[] { SpanKind.Code, SpanKind.XmlDoc });
+        var plan = CodeQueryPlanner.Build(request);
+        var result = await NewExecutor(index).ExecuteAsync(request, plan, default);
+
+        Assert.NotEmpty(result.Matches);
+    }
+
+    [Fact]
+    public async Task SortByPath_ProducesOrdinalPathOrder_Deterministic()
+    {
+        // Seed files whose insertion order does not match their ordinal path
+        // order. Before SortMatches landed, the executor returned matches in
+        // file_id order (= insertion order), contradicting the DTO's
+        // SortBy.Path default.
+        await using var index = await SeedAsync(new[]
+        {
+            ("z/late.cs", "hit\n"),
+            ("a/early.cs", "hit\n"),
+            ("m/middle.cs", "hit\n"),
+        });
+
+        var request = new SearchRequest("hit", Mode: QueryMode.Code, SortBy: SortBy.Path);
+        var plan = CodeQueryPlanner.Build(request);
+        var result = await NewExecutor(index).ExecuteAsync(request, plan, default);
+
+        var paths = result.Matches.Select(m => m.Path).ToArray();
+        var sortedPaths = paths.OrderBy(p => p, StringComparer.Ordinal).ToArray();
+        Assert.Equal(sortedPaths, paths);
+    }
 }

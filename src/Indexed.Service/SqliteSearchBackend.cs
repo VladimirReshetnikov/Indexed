@@ -12,11 +12,15 @@ namespace Indexed.Service;
 /// </summary>
 /// <remarks>
 /// <para>
-/// Prose and auto modes still return <see cref="IndexedErrorCode.NotImplemented"/>:
-/// Stage 3 adds <c>prose_fts</c> population, a prose planner, and the auto
-/// merge. The <c>Stage 2</c>-specific contract here is: code-mode queries
-/// are answered entirely from the index, with no file system I/O on the hot
-/// path after initial indexing.
+/// Modes: <see cref="QueryMode.Code"/> and <see cref="QueryMode.Auto"/> are
+/// answered by this backend; until Stage 3 lands a prose planner,
+/// <c>Auto</c> is treated as an alias for <c>Code</c> so that a caller who
+/// accepts the DTO default gets sensible results rather than a
+/// <see cref="IndexedErrorCode.NotImplemented"/>. Explicit
+/// <see cref="QueryMode.Prose"/> still returns <c>NotImplemented</c>. The
+/// <c>Stage 2</c>-specific contract is: code-mode queries resolve candidate
+/// file ids from the index and rehydrate content from the working tree —
+/// no per-request file scan over the whole repo.
 /// </para>
 /// <para>
 /// Timeout handling: the request's <see cref="SearchRequest.TimeoutMs"/> is
@@ -52,11 +56,14 @@ internal sealed class SqliteSearchBackend : ISearchBackend
         if (string.IsNullOrEmpty(request.Pattern))
             return BadRequest("pattern must be non-empty");
 
-        if (request.Mode is QueryMode.Prose or QueryMode.Auto)
+        // Auto falls back to Code until Stage 3 ships a prose planner —
+        // the DTO default is Auto, and returning NotImplemented to callers
+        // who simply omitted Mode would be a usability regression.
+        if (request.Mode == QueryMode.Prose)
         {
             return SearchBackendResult.Fail(new ErrorResponse(
                 IndexedErrorCode.NotImplemented,
-                "prose and auto modes require the extractor layer (Stage 3); use mode=code for now"));
+                "prose mode requires the extractor layer (Stage 3); use mode=code"));
         }
 
         if (request.MaxMatches is < 1 or > 10_000)
@@ -69,6 +76,17 @@ internal sealed class SqliteSearchBackend : ISearchBackend
             return BadRequest("contextAfter must be in [0, 50]");
         if (request.TimeoutMs is < 1 or > 30_000)
             return BadRequest("timeoutMs must be in [1, 30000]");
+
+        // SortBy: path-order is honored by the executor (deterministic
+        // ordinal sort after collection); relevance requires FTS5 BM25
+        // scoring that Stage 2 does not compute. Reject up front rather
+        // than silently return path-ordered results.
+        if (request.SortBy == SortBy.Relevance)
+        {
+            return SearchBackendResult.Fail(new ErrorResponse(
+                IndexedErrorCode.NotImplemented,
+                "sortBy=relevance requires BM25 scoring (Stage 3); use sortBy=path"));
+        }
 
         CodeQueryPlan plan;
         try

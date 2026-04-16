@@ -182,6 +182,37 @@ public sealed class SqliteIndexTests : IDisposable
 
         Assert.Equal(0L, index.GetFileCount());
     }
+
+    [Fact]
+    public async Task WriterScope_DoubleDispose_IsIdempotent()
+    {
+        // Regression test: before the Interlocked-flag guard, a second
+        // DisposeAsync would call ReleaseWriterLock() again, permitting a
+        // concurrent writer to slip in while another scope was still
+        // legitimately holding the semaphore. Verify that two successive
+        // disposes still leave the writer available exactly once.
+        await using var index = SqliteIndex.OpenOrCreate(DbPath);
+
+        var scope = await index.BeginWriteAsync();
+        SqliteIndex.UpsertFile(scope, "x.cs", 1, 1, new byte[32], "csharp", 1, "aaa");
+        await scope.DisposeAsync();
+        // Second dispose must be a no-op; in particular it must NOT release
+        // the semaphore again.
+        await scope.DisposeAsync();
+
+        // If the double-dispose had double-released, the next BeginWriteAsync
+        // would complete immediately even while another writer holds the
+        // lock. Simulate the hazard: acquire one scope and verify the next
+        // BeginWriteAsync does NOT complete instantly (it should wait).
+        await using var held = await index.BeginWriteAsync();
+        var second = index.BeginWriteAsync().AsTask();
+        // Give the pending acquire a moment; if the semaphore were over-
+        // released by the double-dispose it would already be completed.
+        await Task.Delay(50);
+        Assert.False(second.IsCompleted, "BeginWriteAsync returned while another scope was live — writer semaphore leaked");
+        await held.DisposeAsync();
+        await using var s = await second;
+    }
 }
 
 /// <summary>Helper to keep the sync test readable despite the async-disposable API.</summary>

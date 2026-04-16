@@ -7,20 +7,23 @@ using Microsoft.Extensions.Logging.Abstractions;
 namespace Indexed.Core;
 
 /// <summary>
-/// Polls <c>.git/index</c> mtime and <c>git rev-parse HEAD</c> on a timer,
-/// pushing <see cref="HeadMoved"/> into the <see cref="DebouncingEventQueue"/>
-/// when HEAD has changed since the last known <c>indexed_head</c>.
+/// Polls <c>git rev-parse HEAD</c> on a timer, pushing <see cref="HeadMoved"/>
+/// into the <see cref="DebouncingEventQueue"/> when HEAD has changed since the
+/// last known <c>indexed_head</c>.
 /// </summary>
 /// <remarks>
 /// <para>
-/// The mtime check makes the common case (no git operation in the last tick)
-/// a single <c>stat()</c> call — no process spawn. Only when the mtime
-/// changes does the poller run <c>git rev-parse HEAD</c>.
+/// Default interval: 1 second. A full <c>git rev-parse HEAD</c> runs every
+/// tick because the obvious mtime canary (<c>.git/index</c>) does <em>not</em>
+/// change on <c>git reset --soft</c>, <c>git update-ref</c>, branch fast-forward
+/// from a fetch, or any other HEAD mutation that leaves the staging area
+/// untouched — historically this caused HEAD moves to be silently dropped.
 /// </para>
 /// <para>
-/// Default interval: 1 second. This is cheap enough to run indefinitely;
-/// the mtime optimization ensures zero git subprocesses when the developer
-/// isn't actively committing/switching.
+/// The subprocess cost (~5–20 ms on a warm repo) is acceptable at 1 Hz on
+/// developer workstations; the alternative — watching <c>.git/HEAD</c> plus
+/// the resolved ref file plus <c>.git/packed-refs</c> — trades correctness
+/// risk (ref packing races, worktree indirection) for marginal savings.
 /// </para>
 /// </remarks>
 public sealed class HeadPoller : IDisposable
@@ -31,7 +34,6 @@ public sealed class HeadPoller : IDisposable
     private readonly ILogger _logger;
     private readonly TimeSpan _interval;
     private Timer? _timer;
-    private DateTimeOffset? _lastIndexMtime;
     private string? _lastKnownHead;
     private int _consecutiveErrors;
 
@@ -72,7 +74,6 @@ public sealed class HeadPoller : IDisposable
         // Seed the last-known HEAD from the index meta so we detect drift
         // immediately on the first tick.
         _lastKnownHead = _index.GetMeta(SqliteSchema.MetaKey_IndexedHead);
-        _lastIndexMtime = _repo.GetIndexMtime();
 
         _timer = new Timer(OnTick, null, _interval, _interval);
         _logger.LogDebug("HeadPoller started, interval={Interval}ms", _interval.TotalMilliseconds);
@@ -89,18 +90,12 @@ public sealed class HeadPoller : IDisposable
     {
         try
         {
-            // Cheap mtime check first.
-            var currentMtime = _repo.GetIndexMtime();
-            if (_lastIndexMtime.HasValue
-                && currentMtime.HasValue
-                && currentMtime.Value == _lastIndexMtime.Value)
-            {
-                // No git operation has touched .git/index since last tick.
-                return;
-            }
-            _lastIndexMtime = currentMtime;
-
-            // Mtime changed — check the actual HEAD.
+            // Read the actual HEAD every tick. The previous implementation
+            // short-circuited on unchanged .git/index mtime, but that canary
+            // misses HEAD-only mutations (reset --soft, update-ref, fetch
+            // fast-forward) — the index file is not touched in those cases,
+            // so the poller never spotted them. A plain rev-parse at 1 Hz
+            // is cheap enough and restores correctness.
             string currentHead;
             try
             {

@@ -180,4 +180,51 @@ public sealed class DebouncingEventQueueTests
         // Global events are separate but there are none here.
         Assert.True(batch.Count <= 3, $"Expected <= 3 events, got {batch.Count}");
     }
+
+    [Fact]
+    public async Task HeadMoved_Multiple_CoalesceToOne_PreservingOldestOldAndNewestNew()
+    {
+        // A→B→C should collapse to A→C so the indexer runs one diff-tree
+        // that covers the whole range rather than two that re-visit B.
+        using var queue = new DebouncingEventQueue(
+            perPathDebounce: TimeSpan.FromMilliseconds(10),
+            globalBatchWindow: TimeSpan.FromMilliseconds(50));
+
+        queue.Enqueue(new HeadMoved("aaa", "bbb"));
+        queue.Enqueue(new HeadMoved("bbb", "ccc"));
+        queue.Enqueue(new HeadMoved("ccc", "ddd"));
+
+        var batch = await queue.DequeueAsync();
+
+        var heads = batch.OfType<HeadMoved>().ToList();
+        Assert.Single(heads);
+        Assert.Equal("aaa", heads[0].OldHead);
+        Assert.Equal("ddd", heads[0].NewHead);
+    }
+
+    [Fact]
+    public async Task MaxBatchSize_AppliesToGlobalEvents_NotJustPerPath()
+    {
+        // Before the fix, _maxBatchSize was only checked inside the per-path
+        // emission loop — a caller that dumped 50 HeadMoved events (e.g. a
+        // noisy rebase + frequent reconciliation pings) would emit all 50 in
+        // a single batch. Global events must respect the cap too.
+        using var queue = new DebouncingEventQueue(
+            perPathDebounce: TimeSpan.FromMilliseconds(10),
+            globalBatchWindow: TimeSpan.FromMilliseconds(50),
+            maxBatchSize: 2);
+
+        // HeadMoved events with distinct SHA pairs coalesce to a single
+        // running aggregate; to exercise the global-batch cap we enqueue a
+        // mix of HeadMoved + ReconciliationRequested + per-path events.
+        queue.Enqueue(new HeadMoved("aaa", "bbb"));
+        queue.Enqueue(new ReconciliationRequested());
+        queue.Enqueue(new FileChanged("a.cs"));
+        queue.Enqueue(new FileChanged("b.cs"));
+        queue.Enqueue(new FileChanged("c.cs"));
+
+        var batch = await queue.DequeueAsync();
+
+        Assert.True(batch.Count <= 2, $"Expected <= 2 events (maxBatchSize), got {batch.Count}");
+    }
 }

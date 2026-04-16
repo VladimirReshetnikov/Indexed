@@ -935,6 +935,16 @@ public sealed class WriterScope : IAsyncDisposable
     private SqliteTransaction? _transaction;
     private bool _failed;
 
+    /// <summary>
+    /// 0 = live, 1 = dispose started/completed. Flipped atomically so that
+    /// a redundant <c>DisposeAsync</c> (e.g. explicit <c>using</c> plus a
+    /// finally-block call in a caller, or a caller that awaits twice) is a
+    /// no-op instead of releasing the writer semaphore a second time —
+    /// that would let a second writer acquire the lock while a legitimately
+    /// live scope still holds it.
+    /// </summary>
+    private int _disposed;
+
     internal WriterScope(SqliteIndex owner, SqliteTransaction transaction)
     {
         _owner = owner;
@@ -954,6 +964,13 @@ public sealed class WriterScope : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
+        // Idempotent dispose. The first caller performs the commit/rollback
+        // and releases the writer semaphore exactly once; subsequent callers
+        // fall through without touching the lock. `_transaction` nulling
+        // alone is not sufficient — a naive second call would still invoke
+        // ReleaseWriterLock() via the null-transaction branch.
+        if (Interlocked.Exchange(ref _disposed, 1) == 1) return;
+
         var tx = _transaction;
         _transaction = null;
         if (tx is null)

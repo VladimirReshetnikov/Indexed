@@ -73,12 +73,39 @@ public sealed class SqliteSearchBackendTests : IDisposable
 
     // ----- mode validation -----
 
-    [Theory]
-    [InlineData(QueryMode.Prose)]
-    [InlineData(QueryMode.Auto)]
-    public async Task ProseAndAutoModes_ReturnNotImplemented(QueryMode mode)
+    [Fact]
+    public async Task ProseMode_ReturnsNotImplemented()
     {
-        var req = new SearchRequest("test", Mode: mode);
+        // Explicit prose is still unsupported in Stage 2; only the extractor
+        // layer (Stage 3) will populate prose_fts.
+        var req = new SearchRequest("test", Mode: QueryMode.Prose);
+        var result = await _backend.SearchAsync(req, CancellationToken.None);
+        Assert.NotNull(result.Error);
+        Assert.Equal(IndexedErrorCode.NotImplemented, result.Error!.Code);
+    }
+
+    [Fact]
+    public async Task AutoMode_FallsBackToCode_AndIsNotRejected()
+    {
+        // Auto is the DTO default; rejecting it would be a usability
+        // regression. Until Stage 3 adds the prose planner the backend
+        // treats Auto as an alias for Code. The specific assertion is the
+        // negative one — no NotImplemented — because the positive hit
+        // depends on test-index contents and the shape of that harness.
+        var req = new SearchRequest("needle", Mode: QueryMode.Auto);
+        var result = await _backend.SearchAsync(req, CancellationToken.None);
+        Assert.False(
+            result.Error?.Code == IndexedErrorCode.NotImplemented,
+            $"Auto should not return NotImplemented; got: {result.Error?.Message}");
+    }
+
+    [Fact]
+    public async Task RelevanceSort_ReturnsNotImplemented()
+    {
+        // Stage 2 does not compute BM25 scores; the executor sorts by path
+        // only. Reject Relevance explicitly rather than silently return
+        // path-ordered results under a relevance label.
+        var req = new SearchRequest("test", Mode: QueryMode.Code, SortBy: SortBy.Relevance);
         var result = await _backend.SearchAsync(req, CancellationToken.None);
         Assert.NotNull(result.Error);
         Assert.Equal(IndexedErrorCode.NotImplemented, result.Error!.Code);

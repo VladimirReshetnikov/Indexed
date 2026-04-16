@@ -92,6 +92,15 @@ public sealed class CodeQueryExecutor
         var truncated = false;
         var total = 0;
 
+        // KindFilter: Stage 2 emits only SpanKind.Code. If the caller asked
+        // for a filter that doesn't include Code, there are no matches to
+        // return — short-circuit before any SQLite work. A null or empty
+        // filter means "any kind" and flows through normally.
+        if (request.KindFilter is { Count: > 0 } kf && !KindFilterIncludesCode(kf))
+        {
+            return new ExecuteResult(matches, truncated, total, sw.ElapsedMilliseconds);
+        }
+
         var includeRegex = CompileOptionalGlob(request.PathGlob, include: true);
         var excludeFilter = new ExcludeFilter(request.ExcludeGlob);
 
@@ -156,13 +165,46 @@ public sealed class CodeQueryExecutor
                     if (matches.Count >= request.MaxMatches)
                     {
                         truncated = true;
+                        SortMatches(matches, request.SortBy);
                         return new ExecuteResult(matches, truncated, total, sw.ElapsedMilliseconds);
                     }
                 }
             }
         }
 
+        SortMatches(matches, request.SortBy);
         return new ExecuteResult(matches, truncated, total, sw.ElapsedMilliseconds);
+    }
+
+    // Stage 2 emits only SpanKind.Code; the DTO's KindFilter is therefore
+    // meaningful only when it *excludes* Code. A caller that asks for
+    // `[XmlDoc]` gets no matches, while `[Code, XmlDoc]` behaves like the
+    // unfiltered case.
+    private static bool KindFilterIncludesCode(IReadOnlyList<SpanKind> filter)
+    {
+        for (var i = 0; i < filter.Count; i++)
+        {
+            if (filter[i] == SpanKind.Code) return true;
+        }
+        return false;
+    }
+
+    // Deterministic path-order: the candidate query returns file_ids sorted
+    // by rowid (insertion order during full-scan), which is *not* the same
+    // as repo-root-relative path order. Callers who omit SortBy inherit the
+    // DTO default (Path), so we always sort at the end of Execute to match
+    // the documented contract. Relevance is gated at the backend layer.
+    private static void SortMatches(List<Abstractions.Match> matches, SortBy sortBy)
+    {
+        if (sortBy != SortBy.Path || matches.Count < 2) return;
+        matches.Sort(static (a, b) =>
+        {
+            var byPath = string.CompareOrdinal(a.Path, b.Path);
+            if (byPath != 0) return byPath;
+            var byLine = a.Line.CompareTo(b.Line);
+            if (byLine != 0) return byLine;
+            return a.Column.CompareTo(b.Column);
+        });
     }
 
     private static bool PathAllowed(string path, Regex? include, ExcludeFilter excludeFilter)

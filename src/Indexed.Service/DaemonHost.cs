@@ -520,10 +520,17 @@ internal sealed class DaemonHost : IAsyncDisposable
 
         var currentHead = string.IsNullOrEmpty(head) ? null : head;
         var pendingCount = _eventQueue?.PendingCount ?? 0;
+        // Fold the indexer's in-flight flag in so a caller that happens to
+        // read /status between DequeueAsync (decrements pendingCount) and
+        // the transaction commit still sees isStale=true. Without this the
+        // freshness window briefly reports isStale=false for work that has
+        // not yet been applied.
+        var inFlight = _incrementalIndexer?.IsProcessingBatch ?? false;
         var isStale = indexedHead is null
             || currentHead is null
             || !string.Equals(indexedHead, currentHead, StringComparison.Ordinal)
-            || pendingCount > 0;
+            || pendingCount > 0
+            || inFlight;
 
         return new Freshness(
             IndexedHead: indexedHead,

@@ -12,18 +12,23 @@ namespace Indexed.Abstractions;
 /// matches in the same order.
 /// </para>
 /// <para>
-/// <see cref="Truncated"/> is set when any cap was hit:
-/// <see cref="SearchRequest.MaxMatches"/>,
-/// <see cref="SearchRequest.MaxMatchesPerFile"/>, or
-/// <see cref="SearchRequest.TimeoutMs"/>. The caller cannot distinguish which
-/// cap fired from the response alone, only that results are incomplete.
+/// <see cref="Truncated"/> is set when either of the collection caps hit —
+/// <see cref="SearchRequest.MaxMatches"/> or
+/// <see cref="SearchRequest.MaxMatchesPerFile"/>. Timeouts do not set this
+/// flag; exceeding <see cref="SearchRequest.TimeoutMs"/> returns an
+/// <see cref="ErrorResponse"/> with
+/// <see cref="IndexedErrorCode.TimeoutExceeded"/> rather than a partial
+/// <see cref="SearchResponse"/>.
 /// </para>
 /// <para>
-/// <see cref="TotalMatches"/> reports the number of hits found <em>before</em>
-/// the global <see cref="SearchRequest.MaxMatches"/> cap was applied. It is at
-/// most the cap plus one (the service stops counting after the cap is
-/// exceeded); callers that need an exact population count must page with
-/// disjoint <see cref="SearchRequest.PathGlob"/> restrictions.
+/// <see cref="TotalMatches"/> is a lower bound on the population of hits
+/// actually scanned: it accumulates the pre-per-file-cap hit count for each
+/// file the executor inspected before the global cap halted the scan. It is
+/// therefore only complete when <see cref="Truncated"/> is <c>false</c>;
+/// when <see cref="Truncated"/> is <c>true</c> the unscanned suffix of the
+/// candidate set contributes nothing to this number. Callers that need an
+/// exact population count must page with disjoint
+/// <see cref="SearchRequest.PathGlob"/> restrictions.
 /// </para>
 /// </remarks>
 /// <param name="Freshness">

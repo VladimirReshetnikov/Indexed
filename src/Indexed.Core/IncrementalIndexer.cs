@@ -51,12 +51,30 @@ public sealed class IncrementalIndexer : IAsyncDisposable
     /// </summary>
     private int _disposed;
 
+    /// <summary>
+    /// Count of batches currently being processed (0 or 1 in practice, since
+    /// there is exactly one worker). Read by <see cref="IsProcessingBatch"/>
+    /// to expose an in-flight signal to freshness reporting.
+    /// </summary>
+    private int _batchesInFlight;
+
 
     /// <summary>
     /// <c>true</c> after the worker loop exits due to an unhandled exception.
     /// Read by <c>DaemonHost.BuildStatus</c> to surface a degraded state.
     /// </summary>
     public bool IsFaulted { get; private set; }
+
+    /// <summary>
+    /// <c>true</c> while the worker is in the middle of applying a batch
+    /// (between <see cref="DebouncingEventQueue.DequeueAsync"/> returning and
+    /// the transaction committing). DaemonHost folds this into
+    /// <see cref="Indexed.Abstractions.Freshness.IsStale"/> so callers don't
+    /// see <c>isStale=false</c> purely because
+    /// <see cref="DebouncingEventQueue.PendingCount"/> has dropped to zero
+    /// during in-flight processing.
+    /// </summary>
+    public bool IsProcessingBatch => Volatile.Read(ref _batchesInFlight) > 0;
 
     /// <summary>
     /// Fires after each batch commit so DaemonHost can reset the idle timer.
@@ -126,6 +144,13 @@ public sealed class IncrementalIndexer : IAsyncDisposable
 
             if (batch.Count == 0) { queueDrained = true; break; } // queue completed normally
 
+            // Mark the batch as in-flight *before* ProcessBatchAsync so that
+            // a concurrent /status between Dequeue (which decrements
+            // PendingCount) and the upsert commit still reports isStale=true.
+            // Decrement in finally — even the OperationCanceledException path
+            // must unwind the counter so a shutdown followed by restart does
+            // not leak a permanent "busy" signal.
+            Interlocked.Increment(ref _batchesInFlight);
             try
             {
                 await ProcessBatchAsync(batch, ct).ConfigureAwait(false);
@@ -139,6 +164,10 @@ public sealed class IncrementalIndexer : IAsyncDisposable
             {
                 _logger.LogError(ex, "error processing batch of {Count} events", batch.Count);
                 // Continue — don't crash the worker loop on transient errors.
+            }
+            finally
+            {
+                Interlocked.Decrement(ref _batchesInFlight);
             }
         }
 

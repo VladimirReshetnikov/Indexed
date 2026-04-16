@@ -14,10 +14,14 @@ namespace Indexed.Abstractions;
 /// display it directly without re-reading the file.
 /// </para>
 /// <para>
-/// Byte offset semantics: <see cref="ByteOffset"/> is the 0-based offset of
-/// the first byte of <see cref="Text"/> within the raw file bytes. For files
-/// with a BOM, the BOM is counted. This is the offset that re-opens the file
-/// at the match location on editors that accept byte offsets.
+/// <see cref="ByteOffset"/> semantics (Stage 2 reality): the value is the
+/// 0-based <em>UTF-16 character offset</em> of the match within the decoded
+/// in-memory string, not the byte offset within the raw file. For pure-ASCII
+/// files the two coincide; for UTF-8 files containing non-ASCII characters
+/// the character offset is less than the byte offset, and for UTF-16 files
+/// they differ by a factor of two. The field is retained under its historical
+/// name for wire compatibility; Stage 3 plans a UTF-8 byte mapping that
+/// matches the documented name without a DTO break.
 /// </para>
 /// <para>
 /// <see cref="Span"/> is populated when and only when <see cref="Kind"/> is
@@ -40,8 +44,9 @@ namespace Indexed.Abstractions;
 /// conventions.
 /// </param>
 /// <param name="ByteOffset">
-/// 0-based byte offset of the first byte of <see cref="Text"/> within the raw
-/// file bytes, including any BOM.
+/// 0-based UTF-16 character offset of <see cref="Text"/> in the decoded
+/// in-memory string. See the remarks section for the byte-vs-character
+/// caveat; the field name is historical.
 /// </param>
 /// <param name="Text">
 /// The full line containing the match, trimmed of trailing line terminators.

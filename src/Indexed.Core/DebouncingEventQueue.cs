@@ -170,8 +170,24 @@ public sealed class DebouncingEventQueue : IDisposable
                     _pendingGlobal.Add(evt);
                 break;
 
-            case HeadMoved:
-                _pendingGlobal.Add(evt);
+            case HeadMoved hm:
+                // HeadMoved is idempotent in intent but the `OldHead` field
+                // matters for the diff-tree: A→B→C must be processed as a
+                // single diff from A to C, not two diffs (A→B then B→C) which
+                // would walk the tree twice and re-upsert the B-only files.
+                // If a HeadMoved is already pending, coalesce by keeping the
+                // earliest `OldHead` and the latest `NewHead`. If none is
+                // pending, add this one as-is.
+                var existingIdx = FindFirstHeadMoved(_pendingGlobal);
+                if (existingIdx >= 0)
+                {
+                    var existing = (HeadMoved)_pendingGlobal[existingIdx];
+                    _pendingGlobal[existingIdx] = new HeadMoved(existing.OldHead, hm.NewHead);
+                }
+                else
+                {
+                    _pendingGlobal.Add(evt);
+                }
                 break;
         }
     }
@@ -183,6 +199,15 @@ public sealed class DebouncingEventQueue : IDisposable
         return false;
     }
 
+    private static int FindFirstHeadMoved(List<IndexEvent> events)
+    {
+        for (var i = 0; i < events.Count; i++)
+        {
+            if (events[i] is HeadMoved) return i;
+        }
+        return -1;
+    }
+
     private IReadOnlyList<IndexEvent> Flush()
     {
         var now = DateTimeOffset.UtcNow;
@@ -190,8 +215,25 @@ public sealed class DebouncingEventQueue : IDisposable
 
         // Emit global events first — HeadMoved should be processed before
         // per-path events so the diff-tree supersedes stale FSW events.
-        result.AddRange(_pendingGlobal);
-        _pendingGlobal.Clear();
+        // Apply _maxBatchSize across the whole emitted list so a batch
+        // flooded with global events cannot balloon past the cap. Any
+        // overflow stays in _pendingGlobal and will be emitted on the next
+        // drain.
+        var globalConsumed = 0;
+        for (var i = 0; i < _pendingGlobal.Count && result.Count < _maxBatchSize; i++)
+        {
+            result.Add(_pendingGlobal[i]);
+            globalConsumed++;
+        }
+        if (globalConsumed == _pendingGlobal.Count)
+            _pendingGlobal.Clear();
+        else
+            _pendingGlobal.RemoveRange(0, globalConsumed);
+
+        // If the global events alone filled the batch, defer per-path work
+        // to the next drain rather than starving it entirely.
+        if (result.Count >= _maxBatchSize)
+            return result;
 
         // Emit per-path events that have settled past the per-path debounce.
         var ripe = new List<string>();
