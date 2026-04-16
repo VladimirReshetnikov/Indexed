@@ -107,6 +107,7 @@ public sealed class IncrementalIndexer : IAsyncDisposable
     private async Task WorkerLoopAsync(CancellationToken ct)
     {
         _logger.LogInformation("incremental indexer worker started");
+        var queueDrained = false;
 
         while (!ct.IsCancellationRequested)
         {
@@ -120,7 +121,7 @@ public sealed class IncrementalIndexer : IAsyncDisposable
                 break;
             }
 
-            if (batch.Count == 0) break; // queue completed
+            if (batch.Count == 0) { queueDrained = true; break; } // queue completed normally
 
             try
             {
@@ -138,7 +139,7 @@ public sealed class IncrementalIndexer : IAsyncDisposable
             }
         }
 
-        if (ct.IsCancellationRequested)
+        if (ct.IsCancellationRequested || queueDrained)
             _logger.LogInformation("incremental indexer worker stopped (shutdown)");
         else
         {
@@ -345,6 +346,7 @@ public sealed class IncrementalIndexer : IAsyncDisposable
                     break;
 
                 case DiffStatus.Copied:
+                case DiffStatus.Unmerged:
                     toUpsert.Add(entry.Path);
                     break;
             }

@@ -44,12 +44,23 @@ public sealed class SqliteIndex : IAsyncDisposable
     private readonly SemaphoreSlim _writerLock = new(initialCount: 1, maxCount: 1);
     private readonly List<SqliteConnection> _readers = new();
     private readonly SemaphoreSlim _readerLock = new(initialCount: 1, maxCount: 1);
+
+    // Dedicated reader connection for synchronous read methods (GetMeta,
+    // GetFileCount, TryGetShaByPath, LookupFileIdByPath). These methods are
+    // called from HTTP request threads, timer callbacks, and the indexer
+    // worker — potentially concurrently with an open WriterScope. A separate
+    // reader connection avoids racing commands on the writer connection.
+    // Access is serialized through _syncReaderGate.
+    private readonly SqliteConnection _syncReader;
+    private readonly object _syncReaderGate = new();
+
     private bool _disposed;
 
-    private SqliteIndex(string dbPath, SqliteConnection writer)
+    private SqliteIndex(string dbPath, SqliteConnection writer, SqliteConnection syncReader)
     {
         _dbPath = dbPath;
         _writer = writer;
+        _syncReader = syncReader;
     }
 
     /// <summary>Absolute path to the backing <c>index.db</c> file.</summary>
@@ -130,7 +141,22 @@ public sealed class SqliteIndex : IAsyncDisposable
                     "index.db was just created but schema version check still failed — likely an FTS5 tokenizer support issue.");
             }
 
-            var index = new SqliteIndex(dbPath, writer) { SchemaVersion = version };
+            // Open a dedicated reader connection for synchronous read methods
+            // that may be called concurrently with the writer. Uses private
+            // cache mode (not shared) so that WAL-mode concurrent reads are
+            // not blocked by an active writer transaction on the same table.
+            var syncReader = OpenSyncReader(dbPath);
+            try
+            {
+                ApplyConnectionPragmas(syncReader);
+            }
+            catch
+            {
+                syncReader.Dispose();
+                throw;
+            }
+
+            var index = new SqliteIndex(dbPath, writer, syncReader) { SchemaVersion = version };
             return index;
         }
         catch
@@ -141,14 +167,18 @@ public sealed class SqliteIndex : IAsyncDisposable
     }
 
     /// <summary>Read a <c>meta</c> KV. Returns <c>null</c> when absent.</summary>
+    /// <remarks>Thread-safe: uses the dedicated sync reader connection.</remarks>
     public string? GetMeta(string key)
     {
         ThrowIfDisposed();
-        using var cmd = _writer.CreateCommand();
-        cmd.CommandText = "SELECT value FROM meta WHERE key = $k;";
-        cmd.Parameters.AddWithValue("$k", key);
-        var result = cmd.ExecuteScalar();
-        return result is string s ? s : null;
+        lock (_syncReaderGate)
+        {
+            using var cmd = _syncReader.CreateCommand();
+            cmd.CommandText = "SELECT value FROM meta WHERE key = $k;";
+            cmd.Parameters.AddWithValue("$k", key);
+            var result = cmd.ExecuteScalar();
+            return result is string s ? s : null;
+        }
     }
 
     /// <summary>Upsert a <c>meta</c> KV. Null <paramref name="value"/> deletes the row.</summary>
@@ -174,12 +204,16 @@ public sealed class SqliteIndex : IAsyncDisposable
     }
 
     /// <summary>Total number of rows in <c>files</c>.</summary>
+    /// <remarks>Thread-safe: uses the dedicated sync reader connection.</remarks>
     public long GetFileCount()
     {
         ThrowIfDisposed();
-        using var cmd = _writer.CreateCommand();
-        cmd.CommandText = "SELECT COUNT(*) FROM files;";
-        return (long)(cmd.ExecuteScalar() ?? 0L);
+        lock (_syncReaderGate)
+        {
+            using var cmd = _syncReader.CreateCommand();
+            cmd.CommandText = "SELECT COUNT(*) FROM files;";
+            return (long)(cmd.ExecuteScalar() ?? 0L);
+        }
     }
 
     /// <summary>
@@ -358,14 +392,18 @@ public sealed class SqliteIndex : IAsyncDisposable
     /// Look up the <c>sha256</c> currently recorded for <paramref name="path"/>.
     /// Returns an empty array when absent.
     /// </summary>
+    /// <remarks>Thread-safe: uses the dedicated sync reader connection.</remarks>
     public byte[] TryGetShaByPath(string path)
     {
         ThrowIfDisposed();
-        using var cmd = _writer.CreateCommand();
-        cmd.CommandText = "SELECT sha256 FROM files WHERE path = $p;";
-        cmd.Parameters.AddWithValue("$p", path);
-        var result = cmd.ExecuteScalar();
-        return result is byte[] bytes ? bytes : Array.Empty<byte>();
+        lock (_syncReaderGate)
+        {
+            using var cmd = _syncReader.CreateCommand();
+            cmd.CommandText = "SELECT sha256 FROM files WHERE path = $p;";
+            cmd.Parameters.AddWithValue("$p", path);
+            var result = cmd.ExecuteScalar();
+            return result is byte[] bytes ? bytes : Array.Empty<byte>();
+        }
     }
 
     /// <summary>
@@ -473,17 +511,25 @@ public sealed class SqliteIndex : IAsyncDisposable
     /// <c>null</c> when no such file is indexed.
     /// </summary>
     /// <remarks>
-    /// Used by <c>FileDeleted</c> processing in the incremental indexer to
-    /// resolve the ID before calling <see cref="DeleteFile"/>.
+    /// <para>
+    /// Thread-safe: uses the dedicated sync reader connection. Reads committed
+    /// state; callers inside a <see cref="WriterScope"/> should be aware that
+    /// uncommitted deletes from the same scope are not visible to this reader.
+    /// In practice the incremental indexer calls this <em>before</em> issuing
+    /// deletes, so the lookup is always against committed state.
+    /// </para>
     /// </remarks>
     public long? LookupFileIdByPath(string path)
     {
         ThrowIfDisposed();
-        using var cmd = _writer.CreateCommand();
-        cmd.CommandText = "SELECT file_id FROM files WHERE path = $p;";
-        cmd.Parameters.AddWithValue("$p", path);
-        var result = cmd.ExecuteScalar();
-        return result is long id ? id : null;
+        lock (_syncReaderGate)
+        {
+            using var cmd = _syncReader.CreateCommand();
+            cmd.CommandText = "SELECT file_id FROM files WHERE path = $p;";
+            cmd.Parameters.AddWithValue("$p", path);
+            var result = cmd.ExecuteScalar();
+            return result is long id ? id : null;
+        }
     }
 
     /// <summary>
@@ -535,6 +581,7 @@ public sealed class SqliteIndex : IAsyncDisposable
         catch { /* best-effort — the index is a derived artifact */ }
 
         try { await _writer.DisposeAsync().ConfigureAwait(false); } catch { }
+        try { await _syncReader.DisposeAsync().ConfigureAwait(false); } catch { }
 
         SqliteConnection[] readers;
         await _readerLock.WaitAsync().ConfigureAwait(false);
@@ -588,6 +635,26 @@ public sealed class SqliteIndex : IAsyncDisposable
             DataSource = dbPath,
             Mode = SqliteOpenMode.ReadOnly,
             Cache = SqliteCacheMode.Shared,
+            Pooling = false,
+        };
+        var conn = new SqliteConnection(builder.ConnectionString);
+        conn.Open();
+        return conn;
+    }
+
+    /// <summary>
+    /// Open a reader with <see cref="SqliteCacheMode.Private"/> so that WAL
+    /// concurrent reads are not blocked by an active writer transaction.
+    /// Used exclusively for the <see cref="_syncReader"/> connection which
+    /// must tolerate being called while a <see cref="WriterScope"/> is open.
+    /// </summary>
+    private static SqliteConnection OpenSyncReader(string dbPath)
+    {
+        var builder = new SqliteConnectionStringBuilder
+        {
+            DataSource = dbPath,
+            Mode = SqliteOpenMode.ReadOnly,
+            Cache = SqliteCacheMode.Private,
             Pooling = false,
         };
         var conn = new SqliteConnection(builder.ConnectionString);

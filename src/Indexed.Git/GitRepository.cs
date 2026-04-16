@@ -20,6 +20,8 @@ public enum DiffStatus
     Renamed,
     /// <summary>File copied (source retained, new path created).</summary>
     Copied,
+    /// <summary>File is unmerged (conflict). Occurs during merge conflicts.</summary>
+    Unmerged,
 }
 
 /// <summary>
@@ -367,9 +369,18 @@ public sealed class GitRepository
                     i += 3;
                     break;
 
+                case 'U': // unmerged — two-field entry: status + path
+                    if (i + 1 >= fields.Count) goto done;
+                    result.Add(new DiffTreeEntry(DiffStatus.Unmerged, fields[i + 1], null));
+                    i += 2;
+                    break;
+
                 default:
-                    // Unknown status letter (U for unmerged, X for unknown, etc.) — skip.
-                    i++;
+                    // Unknown status letter (X, B, etc.). These are two-field
+                    // entries (status + path) in git diff-tree output. Consume
+                    // both fields to keep the parser synchronized.
+                    if (i + 1 >= fields.Count) goto done;
+                    i += 2;
                     break;
             }
         }

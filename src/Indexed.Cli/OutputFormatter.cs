@@ -31,8 +31,12 @@ internal static class OutputFormatter
     {
         foreach (var match in response.Matches)
         {
+            var beforeLine = match.Line - match.ContextBefore.Count;
             foreach (var ctx in match.ContextBefore)
-                writer.WriteLine($"{match.Path}-{match.Line}-{ctx}");
+            {
+                writer.WriteLine($"{match.Path}-{beforeLine}-{ctx}");
+                beforeLine++;
+            }
 
             writer.WriteLine($"{match.Path}:{match.Line}:{match.Column}:{match.Text}");
 

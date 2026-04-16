@@ -52,8 +52,10 @@ public sealed class OutputFormatterTests
         OutputFormatter.WriteSearchText(sw, response);
 
         var lines = sw.ToString().TrimEnd('\r', '\n').Split('\n');
-        Assert.Contains("a.cs-10-before1", lines[0]);
-        Assert.Contains("a.cs-10-before2", lines[1]);
+        // Context-before lines carry their own line numbers, not the match line.
+        // Match on line 10 with 2 context-before lines → lines 8, 9.
+        Assert.Contains("a.cs-8-before1", lines[0]);
+        Assert.Contains("a.cs-9-before2", lines[1]);
         Assert.Contains("a.cs:10:1:match line", lines[2]);
         Assert.Contains("a.cs-11-after1", lines[3]);
         Assert.Contains("a.cs-12-after2", lines[4]);
