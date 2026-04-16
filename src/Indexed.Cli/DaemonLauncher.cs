@@ -37,6 +37,12 @@ internal static class DaemonLauncher
     /// <param name="daemonJsonPath">Path to watch for the bound port-file.</param>
     /// <param name="timeout">How long to wait for the daemon to become ready.</param>
     /// <param name="appData">Optional override of <c>%APPDATA%\Indexed</c>.</param>
+    /// <param name="indexExcludeGlobs">Additional index-time exclude globs forwarded on launch.</param>
+    /// <param name="noDefaultExcludes">
+    /// When <c>true</c>, passes <c>--no-default-excludes</c> so the daemon
+    /// does not apply the built-in default exclude list.
+    /// </param>
+    /// <param name="cancellationToken">Cancellation token.</param>
     /// <returns>The observed <see cref="DaemonInfo"/>, or <c>null</c> on timeout.</returns>
     public static async Task<DaemonInfo?> LaunchAsync(
         string repoRoot,
@@ -44,6 +50,7 @@ internal static class DaemonLauncher
         TimeSpan timeout,
         string? appData = null,
         IReadOnlyList<string>? indexExcludeGlobs = null,
+        bool noDefaultExcludes = false,
         CancellationToken cancellationToken = default)
     {
         var exe = ResolveServiceExecutable()
@@ -72,6 +79,10 @@ internal static class DaemonLauncher
                 psi.ArgumentList.Add("--exclude-index");
                 psi.ArgumentList.Add(glob);
             }
+        }
+        if (noDefaultExcludes)
+        {
+            psi.ArgumentList.Add("--no-default-excludes");
         }
 
         using var _ = Process.Start(psi)

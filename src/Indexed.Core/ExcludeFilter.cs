@@ -11,13 +11,89 @@ namespace Indexed.Core;
 /// <see cref="IncrementalIndexer"/>, <see cref="RepoWatcher"/>, and
 /// <see cref="CodeQueryExecutor"/>.
 /// </summary>
-internal sealed class ExcludeFilter
+/// <remarks>
+/// <para>
+/// The static <see cref="DefaultBinaryAdjacentGlobs"/> list provides a curated
+/// set of patterns for files that inflate the FTS5 trigram index without
+/// providing search value (lockfiles, minified bundles, source maps, generated
+/// code). It is applied by default via <see cref="Combine"/>; callers can opt
+/// out by passing <c>useDefaults: false</c>.
+/// </para>
+/// </remarks>
+public sealed class ExcludeFilter
 {
     private readonly IReadOnlyList<Regex> _regexes;
 
     /// <summary>An empty filter that matches nothing.</summary>
     public static ExcludeFilter None { get; } = new(Array.Empty<Regex>());
 
+    /// <summary>
+    /// Curated default globs for files that inflate the trigram index without
+    /// providing useful search value. Includes JS/TS and ecosystem lockfiles,
+    /// minified bundles, source maps, and generated C# files.
+    /// </summary>
+    /// <remarks>
+    /// <para>Applied by default in <see cref="DaemonOptions.UseDefaultIndexExcludes"/>.</para>
+    /// <list type="bullet">
+    ///   <item><description><c>**/package-lock.json</c>, <c>**/yarn.lock</c>, <c>**/pnpm-lock.yaml</c>, <c>**/npm-shrinkwrap.json</c> — JS/TS lockfiles.</description></item>
+    ///   <item><description><c>**/*.min.js</c>, <c>**/*.min.css</c> — minified bundles.</description></item>
+    ///   <item><description><c>**/*.map</c> — source maps (often larger than the source they describe).</description></item>
+    ///   <item><description><c>**/Cargo.lock</c>, <c>**/composer.lock</c>, <c>**/Gemfile.lock</c>, <c>**/Pipfile.lock</c>, <c>**/poetry.lock</c>, <c>**/go.sum</c>, <c>**/packages.lock.json</c> — other ecosystem lockfiles.</description></item>
+    ///   <item><description><c>**/*.generated.cs</c>, <c>**/*.g.cs</c>, <c>**/*.g.i.cs</c>, <c>**/*.Designer.cs</c> — generated C# files with high token density and low search value.</description></item>
+    /// </list>
+    /// </remarks>
+    public static IReadOnlyList<string> DefaultBinaryAdjacentGlobs { get; } = new string[]
+    {
+        // JS/TS lockfiles
+        "**/package-lock.json",
+        "**/yarn.lock",
+        "**/pnpm-lock.yaml",
+        "**/npm-shrinkwrap.json",
+
+        // Minified bundles and source maps
+        "**/*.min.js",
+        "**/*.min.css",
+        "**/*.map",
+
+        // Ecosystem lockfiles
+        "**/Cargo.lock",
+        "**/composer.lock",
+        "**/Gemfile.lock",
+        "**/Pipfile.lock",
+        "**/poetry.lock",
+        "**/go.sum",
+        "**/packages.lock.json",
+
+        // Generated C# files (protobuf, T4, WinForms designer)
+        "**/*.generated.cs",
+        "**/*.g.cs",
+        "**/*.g.i.cs",
+        "**/*.Designer.cs",
+    };
+
+    /// <summary>
+    /// Concatenate two glob lists into a single <see cref="IReadOnlyList{T}"/>.
+    /// Returns <c>null</c> when both inputs are null or empty.
+    /// </summary>
+    /// <param name="a">User-supplied globs (may be <c>null</c>).</param>
+    /// <param name="b">Additional globs to append (may be <c>null</c>).</param>
+    public static IReadOnlyList<string>? Combine(IReadOnlyList<string>? a, IReadOnlyList<string>? b)
+    {
+        var aEmpty = a is null || a.Count == 0;
+        var bEmpty = b is null || b.Count == 0;
+        if (aEmpty && bEmpty) return null;
+        if (aEmpty) return b;
+        if (bEmpty) return a;
+        var merged = new string[a!.Count + b!.Count];
+        for (var i = 0; i < a.Count; i++) merged[i] = a[i];
+        for (var i = 0; i < b.Count; i++) merged[a.Count + i] = b[i];
+        return merged;
+    }
+
+    /// <summary>
+    /// Create a filter from the given glob list. Pass <c>null</c> for an
+    /// empty (pass-through) filter.
+    /// </summary>
     public ExcludeFilter(IReadOnlyList<string>? globs)
     {
         _regexes = Compile(globs);

@@ -112,6 +112,13 @@ internal sealed class DaemonHost : IAsyncDisposable
         }
         else
         {
+            // Merge user-supplied exclude globs with the built-in defaults
+            // (lockfiles, minified bundles, generated C#, …) unless the caller
+            // has opted out via UseDefaultIndexExcludes = false.
+            var effectiveExcludes = _options.UseDefaultIndexExcludes
+                ? ExcludeFilter.Combine(_options.IndexExcludeGlobs, ExcludeFilter.DefaultBinaryAdjacentGlobs)
+                : _options.IndexExcludeGlobs;
+
             _index = SqliteIndex.OpenOrCreate(_paths.IndexDbPath);
             _index.SetMeta(Indexed.Core.SqliteSchema.MetaKey_RepoId, _repoId);
 
@@ -119,7 +126,7 @@ internal sealed class DaemonHost : IAsyncDisposable
             {
                 _logger.LogInformation("index is empty; running full scan");
                 var scanStarted = Stopwatch.StartNew();
-                var indexer = new FullScanIndexer(_repo, _index, _options.IndexExcludeGlobs, _logger);
+                var indexer = new FullScanIndexer(_repo, _index, effectiveExcludes, _logger);
                 _lastScan = await indexer.RunAsync(progress: null, cancellationToken).ConfigureAwait(false);
                 _logger.LogInformation(
                     "initial full scan complete: indexed={Indexed} skipped={Skipped} unchanged={Unchanged} total={Total} elapsed={ElapsedMs}ms",
@@ -132,12 +139,12 @@ internal sealed class DaemonHost : IAsyncDisposable
             // Stage 4: start the incremental indexer pipeline.
             _eventQueue = new DebouncingEventQueue();
             _incrementalIndexer = new IncrementalIndexer(
-                _repo, _index, _eventQueue, _options.IndexExcludeGlobs, _logger);
+                _repo, _index, _eventQueue, effectiveExcludes, _logger);
             _incrementalIndexer.BatchCommitted += () => _idleTimer?.Poke();
             _incrementalIndexer.Start();
 
             _repoWatcher = new RepoWatcher(
-                _repo.RepoRoot, _eventQueue, _options.IndexExcludeGlobs, _logger);
+                _repo.RepoRoot, _eventQueue, effectiveExcludes, _logger);
             _repoWatcher.Start();
 
             _headPoller = new HeadPoller(

@@ -197,4 +197,50 @@ public sealed class ArgumentParserTests
         var r = ArgumentParser.Parse(new[] { "find", "one", "two" });
         Assert.Equal(CliCommand.Help, r.Command);
     }
+
+    // ----- --no-default-excludes -----
+
+    [Fact]
+    public void Find_NoDefaultExcludes_DefaultIsFalse()
+    {
+        var r = ArgumentParser.Parse(new[] { "find", "foo" });
+        Assert.False(r.NoDefaultExcludes);
+    }
+
+    [Fact]
+    public void Find_NoDefaultExcludes_FlagSetsTrue()
+    {
+        var r = ArgumentParser.Parse(new[] { "find", "foo", "--no-default-excludes" });
+        Assert.Equal(CliCommand.Find, r.Command);
+        Assert.True(r.NoDefaultExcludes);
+    }
+
+    [Theory]
+    [InlineData("status")]
+    [InlineData("rescan")]
+    [InlineData("stop")]
+    public void NonFind_NoDefaultExcludes_FlagAccepted(string verb)
+    {
+        // --no-default-excludes is forwarded to the daemon regardless of verb.
+        var r = ArgumentParser.Parse(new[] { verb, "--no-default-excludes" });
+        Assert.Equal(verb switch
+        {
+            "status" => CliCommand.Status,
+            "rescan" => CliCommand.Rescan,
+            "stop"   => CliCommand.Stop,
+            _        => CliCommand.Help,
+        }, r.Command);
+        Assert.True(r.NoDefaultExcludes);
+    }
+
+    [Fact]
+    public void Find_NoDefaultExcludes_ComposesWithExcludeIndex()
+    {
+        var r = ArgumentParser.Parse(new[]
+        {
+            "find", "foo", "--no-default-excludes", "--exclude-index", "lib/**",
+        });
+        Assert.True(r.NoDefaultExcludes);
+        Assert.Equal(new[] { "lib/**" }, r.IndexExcludeGlob);
+    }
 }

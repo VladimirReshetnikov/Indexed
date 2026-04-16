@@ -35,6 +35,7 @@ idx find <pattern> [--mode auto|code|prose]
                    [--glob | -g <glob>]
                    [--exclude <glob>]*
                    [--exclude-index <glob>]*
+                   [--no-default-excludes]
                    [--kind <kind>]*
                    [--context-before | -B <n>]
                    [--context-after  | -A <n>]
@@ -53,8 +54,9 @@ idx find <pattern> [--mode auto|code|prose]
 | `--regex`, `-e` | off | Treat pattern as a .NET regular expression. |
 | `--case-sensitive`, `-s` | off | Case-sensitive matching. Ignored in prose mode. |
 | `--glob`, `-g` | none | Restrict search to files matching this glob (e.g., `src/**/*.cs`). |
-| `--exclude` | none | Exclude files matching this glob. Repeatable. |
+| `--exclude` | none | Exclude files matching this glob from query results. Repeatable. |
 | `--exclude-index` | none | Exclude files from indexing entirely. Repeatable. Passed to the daemon at launch. |
+| `--no-default-excludes` | off | Do not apply the built-in default exclude list (lockfiles, minified bundles, generated C#). See §5.2 for the full list. |
 | `--kind` | all | Filter results by span kind: `code`, `markdown`, `plain-text`, `xml-doc`, `line-comment-block`, `block-comment`. Repeatable. |
 | `-B`, `--context-before` | 0 | Lines of context before each match. |
 | `-A`, `--context-after` | 0 | Lines of context after each match. |
@@ -317,18 +319,66 @@ The daemon accepts these command-line arguments (via `Indexed.Service` `Program.
 | `--idle-timeout-seconds` | 1800 (30 min) | Seconds of inactivity before daemon exits |
 | `--app-data` | `%APPDATA%\Indexed` | Base directory for state files |
 | `--exclude-index` | (none) | Glob patterns to exclude from indexing (repeatable) |
+| `--no-default-excludes` | off | Do not apply the built-in default exclude list |
 
-### 5.2 Built-in exclude patterns
+### 5.2 Built-in default exclude patterns
 
-These paths are excluded from indexing by default via the CLI's `--exclude-index` mechanism:
+The daemon applies a curated default list of exclude patterns on every full
+scan and incremental update. These patterns target files that inflate the FTS5
+trigram index without providing meaningful search value.
 
-- `**/node_modules/**`
-- `**/bin/**`
-- `**/obj/**`
-- `**/*.min.js`
-- `**/*.map`
+**JS/TS lockfiles and bundles**
 
-Override with explicit `--exclude-index` arguments.
+| Pattern | Reason |
+|---------|--------|
+| `**/package-lock.json` | NPM lockfile — large, machine-generated, no search value |
+| `**/yarn.lock` | Yarn lockfile |
+| `**/pnpm-lock.yaml` | pnpm lockfile |
+| `**/npm-shrinkwrap.json` | NPM shrinkwrap |
+| `**/*.min.js` | Minified JavaScript bundle |
+| `**/*.min.css` | Minified CSS bundle |
+| `**/*.map` | Source maps (can exceed the file they map) |
+
+**Ecosystem lockfiles**
+
+| Pattern | Reason |
+|---------|--------|
+| `**/Cargo.lock` | Rust |
+| `**/composer.lock` | PHP Composer |
+| `**/Gemfile.lock` | Ruby Bundler |
+| `**/Pipfile.lock` | Python Pipenv |
+| `**/poetry.lock` | Python Poetry |
+| `**/go.sum` | Go modules checksum |
+| `**/packages.lock.json` | .NET NuGet |
+
+**Generated C# files**
+
+| Pattern | Reason |
+|---------|--------|
+| `**/*.generated.cs` | Generic codegen output |
+| `**/*.g.cs` | Protobuf / Roslyn source generators |
+| `**/*.g.i.cs` | Roslyn incremental generator interface files |
+| `**/*.Designer.cs` | WinForms / XAML designer files |
+
+**Opting out**
+
+To disable the default list and index all files, use `--no-default-excludes`:
+
+```bash
+idx find "lockfileVersion" --no-default-excludes
+```
+
+To disable defaults for the daemon session (persists until the daemon is
+restarted), pass `--no-default-excludes` on the first `idx` invocation that
+starts the daemon:
+
+```bash
+idx status --no-default-excludes   # ensures daemon starts without defaults
+idx find "lockfileVersion"          # subsequent calls use the running daemon
+```
+
+User-supplied `--exclude-index` globs always compose with (or without) the
+default list — they are not mutually exclusive.
 
 ## 6. Data directory layout
 

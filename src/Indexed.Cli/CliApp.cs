@@ -48,6 +48,7 @@ internal static class CliApp
                 appData: null,
                 startupTimeout: null, // 120 s default; cold scan can take tens of seconds
                 indexExcludeGlobs: args.IndexExcludeGlob,
+                noDefaultExcludes: args.NoDefaultExcludes,
                 cancellationToken: cancellationToken).ConfigureAwait(false);
 
             return args.Command switch

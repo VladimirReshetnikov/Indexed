@@ -69,6 +69,23 @@ public sealed record DaemonOptions
     public IReadOnlyList<string>? IndexExcludeGlobs { get; init; }
 
     /// <summary>
+    /// When <c>true</c> (default), the daemon prepends
+    /// <see cref="Indexed.Core.ExcludeFilter.DefaultBinaryAdjacentGlobs"/> to
+    /// <see cref="IndexExcludeGlobs"/> before passing the combined list to the
+    /// indexers and watcher. Set to <c>false</c> to index lockfiles, minified
+    /// bundles, and generated files.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The default list covers JS/TS lockfiles, minified bundles, source maps,
+    /// ecosystem lockfiles (Cargo, Gemfile, …), and generated C# files. These
+    /// files expand the FTS5 trigram index significantly while providing little
+    /// search value. Override with <c>--no-default-excludes</c> on the CLI.
+    /// </para>
+    /// </remarks>
+    public bool UseDefaultIndexExcludes { get; init; } = true;
+
+    /// <summary>
     /// Version string reported by <c>/status</c> and stamped in
     /// <c>daemon.json</c>. Defaults to the assembly's informational version.
     /// </summary>

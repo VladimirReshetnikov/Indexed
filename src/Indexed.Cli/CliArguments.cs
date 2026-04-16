@@ -63,6 +63,13 @@ public sealed record CliArguments
     /// </summary>
     public IReadOnlyList<string>? IndexExcludeGlob { get; init; }
 
+    /// <summary>
+    /// When <c>true</c>, the daemon will <em>not</em> apply the built-in
+    /// default exclude list (lockfiles, minified bundles, generated C#).
+    /// Maps to <c>--no-default-excludes</c> on the CLI.
+    /// </summary>
+    public bool NoDefaultExcludes { get; init; }
+
     /// <summary>Parse error message for <see cref="CliCommand.Help"/>.</summary>
     public string? Diagnostic { get; init; }
 }
