@@ -46,6 +46,7 @@ namespace Indexed.Abstractions;
 [JsonSerializable(typeof(Match))]
 [JsonSerializable(typeof(MatchSpan))]
 [JsonSerializable(typeof(Freshness))]
+[JsonSerializable(typeof(OptimizerStats))]
 [JsonSerializable(typeof(QueryMode))]
 [JsonSerializable(typeof(SpanKind))]
 [JsonSerializable(typeof(SortBy))]

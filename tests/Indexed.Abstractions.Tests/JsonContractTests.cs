@@ -295,6 +295,71 @@ public sealed class JsonContractTests
         Assert.Equal(status, round);
     }
 
+    [Fact]
+    public void StatusResponse_NullOptimizer_OmitsKey()
+    {
+        // The Optimizer field is the new /status projection of IndexOptimizer
+        // counters. When the daemon was started without an optimizer (test
+        // backend override or explicit disable), the field must not appear
+        // on the wire — old clients continue to see the response shape they
+        // expected before N4 landed.
+        var status = new StatusResponse(
+            DaemonVersion: "0.1.0-s2",
+            SchemaVersion: 2,
+            Pid: 7,
+            RepoRoot: @"C:\tmp",
+            RepoId: "a1b2c3d4e5f6",
+            StartedAt: DateTimeOffset.UnixEpoch,
+            Freshness: new Freshness("abc", "abc", 0, null, false),
+            Optimizer: null);
+
+        var json = JsonSerializer.Serialize(status, Context.StatusResponse);
+
+        Assert.DoesNotContain("\"optimizer\":", json);
+    }
+
+    [Fact]
+    public void StatusResponse_WithOptimizer_RoundTripsStats()
+    {
+        var status = new StatusResponse(
+            DaemonVersion: "0.1.0-s2",
+            SchemaVersion: 2,
+            Pid: 7,
+            RepoRoot: @"C:\tmp",
+            RepoId: "a1b2c3d4e5f6",
+            StartedAt: DateTimeOffset.UnixEpoch,
+            Freshness: new Freshness("abc", "abc", 0, null, false),
+            Optimizer: new OptimizerStats(
+                MergeCount: 42,
+                LastMergeAtUtc: new DateTimeOffset(2026, 4, 15, 3, 10, 12, TimeSpan.Zero),
+                LastMergeElapsedMs: 17));
+
+        var json = JsonSerializer.Serialize(status, Context.StatusResponse);
+        var round = JsonSerializer.Deserialize(json, Context.StatusResponse)!;
+
+        Assert.Equal(status, round);
+        Assert.Contains("\"mergeCount\":42", json);
+        Assert.Contains("\"lastMergeElapsedMs\":17", json);
+    }
+
+    [Fact]
+    public void OptimizerStats_ZeroState_OmitsNullTimestampAndElapsed()
+    {
+        // Immediately after daemon start — MergeCount = 0, the two nullable
+        // fields are null. Both should be absent from the wire payload to
+        // match the DefaultIgnoreCondition policy.
+        var stats = new OptimizerStats(
+            MergeCount: 0,
+            LastMergeAtUtc: null,
+            LastMergeElapsedMs: null);
+
+        var json = JsonSerializer.Serialize(stats, Context.OptimizerStats);
+
+        Assert.Contains("\"mergeCount\":0", json);
+        Assert.DoesNotContain("\"lastMergeAtUtc\":", json);
+        Assert.DoesNotContain("\"lastMergeElapsedMs\":", json);
+    }
+
     // ----- ErrorResponse / IndexedErrorCode -----
 
     [Theory]

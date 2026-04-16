@@ -60,13 +60,50 @@ public sealed class IndexOptimizer : IAsyncDisposable
     private int _dirty;
 
     private int _mergeCount;
-    private volatile bool _disposed;
+    private long _lastMergeTicks;          // DateTimeOffset.UtcNow.UtcTicks of last successful merge; 0 = never
+    private long _lastMergeElapsedMs;      // Wall-clock ms of the last successful merge; 0 = never
+
+    /// <summary>
+    /// 0 = live, 1 = disposed. Flipped atomically by <see cref="DisposeAsync"/>
+    /// to keep concurrent dispose callers safe (the daemon shutdown path is
+    /// single-threaded today, but the invariant is enforced here rather than
+    /// delegated to the caller).
+    /// </summary>
+    private int _disposed;
 
     /// <summary>
     /// Total successful merges since construction. Incremented once per
     /// cycle that opens a writer scope and completes without throwing.
     /// </summary>
     public int MergeCount => Volatile.Read(ref _mergeCount);
+
+    /// <summary>
+    /// UTC timestamp of the most recent successful merge, or <c>null</c> when
+    /// no merge has completed yet. Exposed so <c>/status</c> can surface
+    /// optimizer liveness without opening a reader scope.
+    /// </summary>
+    public DateTimeOffset? LastMergeAtUtc
+    {
+        get
+        {
+            var ticks = Interlocked.Read(ref _lastMergeTicks);
+            if (ticks == 0) return null;
+            return new DateTimeOffset(ticks, TimeSpan.Zero);
+        }
+    }
+
+    /// <summary>
+    /// Wall-clock milliseconds spent inside the most recent successful merge,
+    /// or <c>null</c> when no merge has completed yet.
+    /// </summary>
+    public long? LastMergeElapsedMs
+    {
+        get
+        {
+            var ms = Interlocked.Read(ref _lastMergeElapsedMs);
+            return Volatile.Read(ref _mergeCount) == 0 ? null : ms;
+        }
+    }
 
     /// <summary>
     /// Create an optimizer bound to <paramref name="index"/>. The timer is not
@@ -97,7 +134,7 @@ public sealed class IndexOptimizer : IAsyncDisposable
     /// </summary>
     public void Start()
     {
-        if (_disposed) throw new ObjectDisposedException(nameof(IndexOptimizer));
+        if (Volatile.Read(ref _disposed) != 0) throw new ObjectDisposedException(nameof(IndexOptimizer));
         if (_timer is not null) return;
         _timer = new Timer(OnTick, state: null, dueTime: _interval, period: _interval);
         _logger.LogDebug(
@@ -114,7 +151,7 @@ public sealed class IndexOptimizer : IAsyncDisposable
     {
         // No-op after dispose — the optimizer may be torn down before the
         // indexer's last event fires.
-        if (_disposed) return;
+        if (Volatile.Read(ref _disposed) != 0) return;
         Interlocked.Exchange(ref _dirty, 1);
     }
 
@@ -132,7 +169,7 @@ public sealed class IndexOptimizer : IAsyncDisposable
         int? pageBudgetOverride = null,
         CancellationToken cancellationToken = default)
     {
-        if (_disposed) return false;
+        if (Volatile.Read(ref _disposed) != 0) return false;
 
         var budget = pageBudgetOverride ?? _pageBudget;
         if (budget <= 0)
@@ -155,7 +192,7 @@ public sealed class IndexOptimizer : IAsyncDisposable
             try
             {
                 await _index.RunFts5MergeAsync(budget, cancellationToken).ConfigureAwait(false);
-                Interlocked.Increment(ref _mergeCount);
+                RecordMergeCompletion(sw.ElapsedMilliseconds);
                 _logger.LogInformation(
                     "merged fts pages={Pages} elapsed={ElapsedMs}ms",
                     budget, sw.ElapsedMilliseconds);
@@ -187,14 +224,45 @@ public sealed class IndexOptimizer : IAsyncDisposable
     }
 
     /// <summary>
+    /// Atomically stamp the observability counters after a successful merge.
+    /// </summary>
+    private void RecordMergeCompletion(long elapsedMs)
+    {
+        Interlocked.Increment(ref _mergeCount);
+        Interlocked.Exchange(ref _lastMergeTicks, DateTimeOffset.UtcNow.UtcTicks);
+        Interlocked.Exchange(ref _lastMergeElapsedMs, elapsedMs);
+    }
+
+    /// <summary>
+    /// Default shutdown deadline for <see cref="DisposeAsync"/>. Chosen so
+    /// the typical final merge completes well inside the window (tens of ms
+    /// on SSDs with the default 1024-page budget) but a pathological
+    /// contention case cannot wedge daemon shutdown for more than ~10 s.
+    /// </summary>
+    public static TimeSpan DefaultShutdownTimeout { get; } = TimeSpan.FromSeconds(10);
+
+    /// <summary>
     /// Stop the timer and — if a merge is still pending — run one final
     /// merge at double the normal page budget. Exceptions from the final
     /// merge are swallowed (best-effort compaction on shutdown).
     /// </summary>
-    public async ValueTask DisposeAsync()
+    /// <remarks>
+    /// The final merge runs under a bounded deadline so daemon shutdown
+    /// cannot be blocked indefinitely by writer-lock contention. If the
+    /// deadline elapses while waiting for the cycle gate or during the
+    /// merge itself, the call returns quietly and the next daemon start
+    /// picks up the compaction work.
+    /// </remarks>
+    public ValueTask DisposeAsync() => DisposeAsync(DefaultShutdownTimeout);
+
+    /// <summary>
+    /// Variant of <see cref="DisposeAsync()"/> that accepts an explicit
+    /// shutdown deadline. Primarily for tests and callers with bespoke
+    /// shutdown budgets; production code should use the parameterless form.
+    /// </summary>
+    public async ValueTask DisposeAsync(TimeSpan shutdownTimeout)
     {
-        if (_disposed) return;
-        _disposed = true;
+        if (Interlocked.Exchange(ref _disposed, 1) == 1) return;
 
         // Stop the timer first so no more ticks fire concurrently with the
         // final merge. Timer.DisposeAsync waits for an in-flight callback.
@@ -206,30 +274,52 @@ public sealed class IndexOptimizer : IAsyncDisposable
         }
 
         // Best-effort final merge at 2x the per-tick budget. Runs only if
-        // dirty — a clean optimizer has nothing to compact.
+        // dirty — a clean optimizer has nothing to compact. Bounded by
+        // shutdownTimeout so daemon shutdown cannot hang on writer-lock
+        // contention or a slow FTS5 structure rewrite.
         if (Interlocked.CompareExchange(ref _dirty, 0, 1) == 1)
         {
-            await _cycleGate.WaitAsync().ConfigureAwait(false);
+            using var deadlineCts = new CancellationTokenSource(shutdownTimeout);
+            var entered = false;
             try
             {
-                var sw = Stopwatch.StartNew();
                 try
                 {
-                    await _index.RunFts5MergeAsync(_pageBudget * 2, CancellationToken.None)
-                        .ConfigureAwait(false);
-                    Interlocked.Increment(ref _mergeCount);
-                    _logger.LogInformation(
-                        "final fts merge complete pages={Pages} elapsed={ElapsedMs}ms",
-                        _pageBudget * 2, sw.ElapsedMilliseconds);
+                    await _cycleGate.WaitAsync(deadlineCts.Token).ConfigureAwait(false);
+                    entered = true;
                 }
-                catch (Exception ex)
+                catch (OperationCanceledException)
                 {
-                    _logger.LogDebug(ex, "final fts merge on shutdown failed (best-effort)");
+                    _logger.LogDebug(
+                        "final fts merge skipped — shutdown deadline elapsed while waiting for cycle gate");
+                }
+
+                if (entered)
+                {
+                    var sw = Stopwatch.StartNew();
+                    try
+                    {
+                        await _index.RunFts5MergeAsync(_pageBudget * 2, deadlineCts.Token)
+                            .ConfigureAwait(false);
+                        RecordMergeCompletion(sw.ElapsedMilliseconds);
+                        _logger.LogInformation(
+                            "final fts merge complete pages={Pages} elapsed={ElapsedMs}ms",
+                            _pageBudget * 2, sw.ElapsedMilliseconds);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        _logger.LogDebug(
+                            "final fts merge aborted — shutdown deadline elapsed mid-merge");
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogDebug(ex, "final fts merge on shutdown failed (best-effort)");
+                    }
                 }
             }
             finally
             {
-                _cycleGate.Release();
+                if (entered) _cycleGate.Release();
             }
         }
 

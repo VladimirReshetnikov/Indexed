@@ -19,8 +19,11 @@ namespace Indexed.Core.Tests;
 ///   trigram index still produces a candidate. The returned snippet must be
 ///   the <em>new</em> on-disk text.</description></item>
 ///   <item><description>Missing file — the indexer wrote a row, then the file was
-///   deleted/unreadable. The executor must drop the candidate (no phantom
-///   match) and enqueue a <see cref="FileChanged"/> repair.</description></item>
+///   deleted. The executor must drop the candidate (no phantom match) and
+///   enqueue a <see cref="FileDeleted"/> repair so the incremental indexer
+///   removes the stale row on the next batch. Transient read failures
+///   (permissions, I/O, oversize) enqueue <see cref="FileChanged"/>
+///   instead — those are retriable.</description></item>
 ///   <item><description>Oversize file — the on-disk file grew past
 ///   <see cref="FullScanIndexer.MaxIndexableFileBytes"/>. The executor must
 ///   skip it rather than pretending to scan it (preserves parity with
@@ -59,7 +62,7 @@ public sealed class CodeQueryExecutorDiskReadTests : IDisposable
             sha256: new byte[32],
             language: null,
             indexedAt: 1,
-            content: content);
+            textForTokenization: content);
 
         var full = Path.Combine(_repoRoot, relPath.Replace('/', Path.DirectorySeparatorChar));
         Directory.CreateDirectory(Path.GetDirectoryName(full)!);
@@ -97,9 +100,11 @@ public sealed class CodeQueryExecutorDiskReadTests : IDisposable
     public async Task MissingFile_IsSkippedAndRepaired()
     {
         // Index, delete from disk, then search. The trigram posting list
-        // still knows about the file, but the disk read returns null — the
-        // executor must NOT produce a phantom match and must enqueue a
-        // repair so the incremental indexer converges.
+        // still knows about the file, but the disk read returns Missing —
+        // the executor must NOT produce a phantom match and must enqueue a
+        // FileDeleted repair so the incremental indexer removes the stale
+        // row (FileChanged would be a bug: the indexer's FileChanged handler
+        // stats, finds the file gone, and skips without removing the row).
         await using var index = await SeedAsync("gone.cs", "alpha beta");
 
         var diskFull = Path.Combine(_repoRoot, "gone.cs");
@@ -115,12 +120,12 @@ public sealed class CodeQueryExecutorDiskReadTests : IDisposable
         Assert.Empty(result.Matches);
         Assert.Equal(0, result.ReportedTotal);
 
-        // One FileChanged("gone.cs") should now be queued for the incremental
+        // One FileDeleted("gone.cs") should now be queued for the incremental
         // indexer. Pull the debounced batch back out — the queue emits after
         // the batch window even with just one pending event.
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
         var batch = await repairQueue.DequeueAsync(cts.Token);
-        var repair = Assert.IsType<FileChanged>(batch.Single());
+        var repair = Assert.IsType<FileDeleted>(batch.Single());
         Assert.Equal("gone.cs", repair.RelativePath);
     }
 

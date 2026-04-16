@@ -42,10 +42,15 @@ public sealed class IncrementalIndexer : IAsyncDisposable
     private readonly ExcludeFilter _excludeFilter;
     private readonly CancellationTokenSource _cts = new();
     private Task? _workerTask;
-    private bool _disposed;
 
-    /// <summary>Maximum file size for indexing (same as FullScanIndexer).</summary>
-    private const long MaxIndexableFileBytes = 50L * 1024 * 1024;
+    /// <summary>
+    /// 0 = live, 1 = disposed. Flipped atomically via
+    /// <see cref="Interlocked.Exchange(ref int, int)"/> in
+    /// <see cref="DisposeAsync"/> so concurrent dispose callers serialize on
+    /// the first winner.
+    /// </summary>
+    private int _disposed;
+
 
     /// <summary>
     /// <c>true</c> after the worker loop exits due to an unhandled exception.
@@ -89,8 +94,7 @@ public sealed class IncrementalIndexer : IAsyncDisposable
     /// </summary>
     public async ValueTask DisposeAsync()
     {
-        if (_disposed) return;
-        _disposed = true;
+        if (Interlocked.Exchange(ref _disposed, 1) == 1) return;
 
         try { _cts.Cancel(); } catch (ObjectDisposedException) { }
         _queue.Complete();
@@ -206,12 +210,22 @@ public sealed class IncrementalIndexer : IAsyncDisposable
             }
         }
 
+        // Determine whether this batch also advances indexed_head so the
+        // meta write can ride inside the same upsert transaction — one batch,
+        // one commit, regardless of whether the batch contains upserts, a
+        // HeadMoved, or both.
+        string? newHead = null;
+        foreach (var evt in batch)
+        {
+            if (evt is HeadMoved hm) newHead = hm.NewHead;
+        }
+
         // Process upserts.
         var upserted = 0;
         var unchanged = 0;
         var skipped = 0;
 
-        if (toUpsert.Count > 0)
+        if (toUpsert.Count > 0 || newHead is not null)
         {
             await using var scope = await _index.BeginWriteAsync(ct).ConfigureAwait(false);
             try
@@ -233,7 +247,7 @@ public sealed class IncrementalIndexer : IAsyncDisposable
                     {
                         var info = new FileInfo(full);
                         if (!info.Exists) { skipped++; continue; }
-                        if (info.Length > MaxIndexableFileBytes) { skipped++; continue; }
+                        if (info.Length > IndexLimits.MaxIndexableFileBytes) { skipped++; continue; }
                         mtimeUtc = new DateTimeOffset(info.LastWriteTimeUtc, TimeSpan.Zero).ToUnixTimeSeconds();
 
                         // Compute SHA from a stream — avoids allocating the full byte[]
@@ -269,7 +283,7 @@ public sealed class IncrementalIndexer : IAsyncDisposable
                     {
                         bytes = await File.ReadAllBytesAsync(full, ct).ConfigureAwait(false);
                         // Re-check after read: the file may have grown between stat and read.
-                        if (bytes.LongLength > MaxIndexableFileBytes)
+                        if (bytes.LongLength > IndexLimits.MaxIndexableFileBytes)
                         {
                             _logger.LogDebug("skip {Path}: grew past size cap after read ({Size} bytes)", relPath, bytes.LongLength);
                             skipped++;
@@ -300,10 +314,17 @@ public sealed class IncrementalIndexer : IAsyncDisposable
                         sha256: sha,
                         language: language,
                         indexedAt: DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
-                        content: content);
+                        textForTokenization: content);
 
                     upserted++;
                 }
+
+                // Land the HEAD advance inside the same commit as the
+                // upserts it described. If the upsert list was empty (a pure
+                // HeadMoved batch), this scope exists solely for the meta
+                // row and still commits atomically.
+                if (newHead is not null)
+                    _index.SetMeta(SqliteSchema.MetaKey_IndexedHead, newHead);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -311,19 +332,6 @@ public sealed class IncrementalIndexer : IAsyncDisposable
                 _logger.LogError(ex, "failed during upsert batch — rolling back");
                 throw;
             }
-        }
-
-        // Update indexed_head inside a dedicated writer scope so the write
-        // is properly serialized with other writer activity.
-        string? newHead = null;
-        foreach (var evt in batch)
-        {
-            if (evt is HeadMoved hm) newHead = hm.NewHead;
-        }
-        if (newHead is not null)
-        {
-            await using var metaScope = await _index.BeginWriteAsync(ct).ConfigureAwait(false);
-            _index.SetMeta(SqliteSchema.MetaKey_IndexedHead, newHead);
         }
 
         if (upserted > 0 || deleteSet.Count > 0)

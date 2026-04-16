@@ -48,12 +48,11 @@ public sealed class FullScanIndexer
     public static readonly TimeSpan BatchTimeBudget = TimeSpan.FromMilliseconds(250);
 
     /// <summary>
-    /// Files larger than this bypass the indexer. Mirrors the cap baked into
-    /// <see cref="GitRepository.IsLikelyBinary"/> — duplicated here because the
-    /// indexer re-reads file bytes and benefits from the short-circuit before
-    /// allocation.
+    /// Files larger than this bypass the indexer. Alias of
+    /// <see cref="IndexLimits.MaxIndexableFileBytes"/> retained for
+    /// back-compatibility with existing call sites and tests.
     /// </summary>
-    public const long MaxIndexableFileBytes = 50L * 1024 * 1024;
+    public const long MaxIndexableFileBytes = IndexLimits.MaxIndexableFileBytes;
 
     private readonly GitRepository _repo;
     private readonly SqliteIndex _index;
@@ -184,7 +183,7 @@ public sealed class FullScanIndexer
                     sha256: sha,
                     language: language,
                     indexedAt: DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
-                    content: content);
+                    textForTokenization: content);
 
                 stats.Indexed++;
                 filesInBatch++;

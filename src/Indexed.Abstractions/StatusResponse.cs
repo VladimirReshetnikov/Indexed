@@ -40,6 +40,13 @@ namespace Indexed.Abstractions;
 /// </param>
 /// <param name="StartedAt">UTC time the daemon process entered its run loop.</param>
 /// <param name="Freshness">Current index-staleness snapshot.</param>
+/// <param name="Optimizer">
+/// Background FTS5 optimizer counters. <c>null</c> when the daemon is
+/// running without an optimizer (test backend override, or the
+/// configuration explicitly disabled background merges). Absent from the
+/// JSON payload when null — old clients that pre-date this field see a
+/// response shape identical to what they saw before.
+/// </param>
 public sealed record StatusResponse(
     string DaemonVersion,
     int SchemaVersion,
@@ -47,4 +54,5 @@ public sealed record StatusResponse(
     string RepoRoot,
     string RepoId,
     DateTimeOffset StartedAt,
-    Freshness Freshness);
+    Freshness Freshness,
+    OptimizerStats? Optimizer = null);

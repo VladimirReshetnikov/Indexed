@@ -72,7 +72,7 @@ public sealed class IndexOptimizerTests : IDisposable
                 sha256: sha,
                 language: "csharp",
                 indexedAt: i,
-                content: $"public class Cls{i:D4} {{ /* alpha beta gamma delta epsilon {i} */ }}");
+                textForTokenization: $"public class Cls{i:D4} {{ /* alpha beta gamma delta epsilon {i} */ }}");
         }
     }
 

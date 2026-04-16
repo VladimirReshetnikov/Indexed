@@ -102,11 +102,29 @@ public sealed record DaemonInfo(
     }
 
     /// <summary>
-    /// Best-effort delete of <paramref name="path"/>. Never throws.
+    /// Best-effort delete of <paramref name="path"/>. Never throws for
+    /// filesystem or path-validation errors.
     /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The catch list is intentionally narrow: only the exception types
+    /// <see cref="File.Delete(string)"/> can raise. A blanket
+    /// <c>catch</c> would swallow programmer errors
+    /// (<see cref="NullReferenceException"/>,
+    /// <see cref="ObjectDisposedException"/> on injected wrappers, etc.)
+    /// that the daemon should fail fast on rather than hide behind a
+    /// "best-effort cleanup" comment.
+    /// </para>
+    /// </remarks>
     public static void TryDelete(string path)
     {
+        // Catch order: IOException is the base for DirectoryNotFoundException
+        // and PathTooLongException, so the single IOException handler below
+        // subsumes both. Listing them separately would be a build error.
         try { File.Delete(path); }
-        catch { /* best-effort cleanup during shutdown */ }
+        catch (UnauthorizedAccessException) { /* read-only file or ACL */ }
+        catch (IOException) { /* locked, in use, parent missing, path too long */ }
+        catch (ArgumentException) { /* invalid path characters */ }
+        catch (NotSupportedException) { /* path format not supported */ }
     }
 }

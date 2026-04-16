@@ -75,18 +75,31 @@ public sealed class ExcludeFilter
     /// Concatenate two glob lists into a single <see cref="IReadOnlyList{T}"/>.
     /// Returns <c>null</c> when both inputs are null or empty.
     /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Always returns a freshly-allocated array — the caller may freely
+    /// mutate <paramref name="a"/> or <paramref name="b"/> after the call
+    /// without disturbing the returned view. The input lists themselves
+    /// are not modified. Cheap to call: typical default-globs lists are
+    /// on the order of 20 strings.
+    /// </para>
+    /// </remarks>
     /// <param name="a">User-supplied globs (may be <c>null</c>).</param>
     /// <param name="b">Additional globs to append (may be <c>null</c>).</param>
     public static IReadOnlyList<string>? Combine(IReadOnlyList<string>? a, IReadOnlyList<string>? b)
     {
-        var aEmpty = a is null || a.Count == 0;
-        var bEmpty = b is null || b.Count == 0;
-        if (aEmpty && bEmpty) return null;
-        if (aEmpty) return b;
-        if (bEmpty) return a;
-        var merged = new string[a!.Count + b!.Count];
-        for (var i = 0; i < a.Count; i++) merged[i] = a[i];
-        for (var i = 0; i < b.Count; i++) merged[a.Count + i] = b[i];
+        var aCount = a?.Count ?? 0;
+        var bCount = b?.Count ?? 0;
+        if (aCount == 0 && bCount == 0) return null;
+
+        // Always copy: prevents caller mutations from silently changing the
+        // returned view, and keeps the result type predictable (always a
+        // fresh string[]) regardless of input-list implementation.
+        var merged = new string[aCount + bCount];
+        if (aCount > 0)
+            for (var i = 0; i < aCount; i++) merged[i] = a![i];
+        if (bCount > 0)
+            for (var i = 0; i < bCount; i++) merged[aCount + i] = b![i];
         return merged;
     }
 

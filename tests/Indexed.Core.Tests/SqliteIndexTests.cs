@@ -57,7 +57,7 @@ public sealed class SqliteIndexTests : IDisposable
                 sha256: sha,
                 language: "csharp",
                 indexedAt: 2,
-                content: "public class Alpha { }");
+                textForTokenization: "public class Alpha { }");
         }
 
         var candidates = await index.QueryCodeCandidatesAsync("\"alp\"", default);

@@ -158,11 +158,29 @@ public sealed class DebouncingEventQueue : IDisposable
                 _pendingPaths[fd.RelativePath] = (fd, DateTimeOffset.UtcNow);
                 break;
 
-            case HeadMoved:
             case ReconciliationRequested:
+                // Reconciliation is idempotent: one pass diffs the index
+                // against git and emits corrective events. Multiple
+                // ReconciliationRequested events in the same batch are
+                // redundant — every repair-queue enqueue from the executor
+                // would otherwise add another one, and a single batch on a
+                // freshly-started daemon with many stale rows could
+                // accumulate dozens. Coalesce to one.
+                if (!ContainsReconciliation(_pendingGlobal))
+                    _pendingGlobal.Add(evt);
+                break;
+
+            case HeadMoved:
                 _pendingGlobal.Add(evt);
                 break;
         }
+    }
+
+    private static bool ContainsReconciliation(List<IndexEvent> events)
+    {
+        foreach (var e in events)
+            if (e is ReconciliationRequested) return true;
+        return false;
     }
 
     private IReadOnlyList<IndexEvent> Flush()

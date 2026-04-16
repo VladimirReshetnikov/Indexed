@@ -467,7 +467,26 @@ internal sealed class DaemonHost : IAsyncDisposable
             RepoRoot: _repo!.RepoRoot,
             RepoId: _repoId!,
             StartedAt: _startedAt,
-            Freshness: BuildFreshness());
+            Freshness: BuildFreshness(),
+            Optimizer: BuildOptimizerStats());
+
+    /// <summary>
+    /// Project <see cref="IndexOptimizer"/> counters into the serializable
+    /// DTO, or <c>null</c> when no optimizer is wired (test backend
+    /// override). All reads go through <c>IndexOptimizer</c>'s
+    /// <c>Volatile.Read</c>/<c>Interlocked.Read</c> accessors so this method
+    /// is safe to call from any HTTP request thread concurrently with an
+    /// in-flight merge.
+    /// </summary>
+    private OptimizerStats? BuildOptimizerStats()
+    {
+        var opt = _indexOptimizer;
+        if (opt is null) return null;
+        return new OptimizerStats(
+            MergeCount: opt.MergeCount,
+            LastMergeAtUtc: opt.LastMergeAtUtc,
+            LastMergeElapsedMs: opt.LastMergeElapsedMs);
+    }
 
     private Freshness BuildFreshness()
     {

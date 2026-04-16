@@ -98,19 +98,43 @@ public sealed class ExcludeFilterDefaultGlobsTests
     }
 
     [Fact]
-    public void Combine_NullAndList_ReturnsSecond()
+    public void Combine_NullAndList_ReturnsCopyWithSecondContent()
     {
+        // Combine always allocates a fresh array so callers that mutate the
+        // input list post-call cannot disturb the returned view. The
+        // assertion is on content equality, not reference identity.
         var b = new[] { "a/**" };
         var result = ExcludeFilter.Combine(null, b);
-        Assert.Same(b, result);
+        Assert.NotNull(result);
+        Assert.NotSame(b, result);
+        Assert.Equal(b, result);
     }
 
     [Fact]
-    public void Combine_ListAndNull_ReturnsFirst()
+    public void Combine_ListAndNull_ReturnsCopyWithFirstContent()
     {
         var a = new[] { "a/**" };
         var result = ExcludeFilter.Combine(a, null);
-        Assert.Same(a, result);
+        Assert.NotNull(result);
+        Assert.NotSame(a, result);
+        Assert.Equal(a, result);
+    }
+
+    [Fact]
+    public void Combine_ReturnedArray_IsInsulatedFromLaterMutation()
+    {
+        // Regression guard for the defensive-copy invariant: a caller that
+        // mutates the source list after Combine() must not see that mutation
+        // in the returned view (otherwise a global DefaultBinaryAdjacentGlobs
+        // reference passed as `a` would let mistaken mutations leak into
+        // every subsequent ExcludeFilter).
+        var mutable = new List<string> { "x", "y" };
+        var result = ExcludeFilter.Combine(mutable, null);
+        Assert.NotNull(result);
+        Assert.Equal(2, result.Count);
+
+        mutable.Add("z");
+        Assert.Equal(2, result.Count);
     }
 
     [Fact]

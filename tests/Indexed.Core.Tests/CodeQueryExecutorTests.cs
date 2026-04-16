@@ -54,7 +54,7 @@ public sealed class CodeQueryExecutorTests : IDisposable
                 sha256: new byte[32],
                 language: null,
                 indexedAt: 1,
-                content: content);
+                textForTokenization: content);
 
             var full = Path.Combine(_repoRoot, path.Replace('/', Path.DirectorySeparatorChar));
             Directory.CreateDirectory(Path.GetDirectoryName(full)!);

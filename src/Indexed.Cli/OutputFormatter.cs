@@ -76,6 +76,16 @@ internal static class OutputFormatter
             $"stale   {status.Freshness.IsStale} (pending={status.Freshness.PendingFileCount})");
         if (!string.IsNullOrEmpty(status.Freshness.Note))
             writer.WriteLine($"note    {status.Freshness.Note}");
+        if (status.Optimizer is { } opt)
+        {
+            // Operator-friendly one-liner. last= is omitted pre-first-merge
+            // so a freshly-started daemon shows "merges 0" rather than a
+            // misleading Unix-epoch timestamp.
+            var last = opt.LastMergeAtUtc is { } at
+                ? $" last={at:O} ({opt.LastMergeElapsedMs ?? 0}ms)"
+                : string.Empty;
+            writer.WriteLine($"merges  {opt.MergeCount}{last}");
+        }
     }
 
     public static void WriteError(TextWriter writer, ErrorResponse error)

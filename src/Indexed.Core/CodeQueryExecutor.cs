@@ -119,20 +119,34 @@ public sealed class CodeQueryExecutor
                 cancellationToken.ThrowIfCancellationRequested();
                 if (!PathAllowed(row.Path, includeRegex, excludeFilter)) continue;
 
-                var content = await _contentProvider
+                var outcome = await _contentProvider
                     .ReadAsync(row.Path, cancellationToken)
                     .ConfigureAwait(false);
-                if (content is null)
+                if (!outcome.IsOk)
                 {
-                    // File missing/unreadable/oversized since the index was
-                    // written. Enqueue a repair so the incremental indexer
-                    // converges; do not produce a match from a stale index
-                    // row.
-                    _repairQueue?.Enqueue(new FileChanged(row.Path));
+                    // Disk confirmed the index row is stale. Enqueue the
+                    // right repair event so the incremental indexer converges:
+                    //   - Missing / OutOfRoot → the file is gone from the
+                    //     caller's point of view; FileDeleted lets the indexer
+                    //     remove the row on the next batch.
+                    //   - Oversize / Unreadable → transient from the caller's
+                    //     point of view; FileChanged prompts a retry where the
+                    //     indexer will re-observe the condition and skip, but
+                    //     a later write will re-add.
+                    if (_repairQueue is not null)
+                    {
+                        IndexEvent repair = outcome.Status switch
+                        {
+                            FileReadStatus.Missing => new FileDeleted(row.Path),
+                            FileReadStatus.OutOfRoot => new FileDeleted(row.Path),
+                            _ => new FileChanged(row.Path),
+                        };
+                        _repairQueue.Enqueue(repair);
+                    }
                     continue;
                 }
 
-                var hits = ScanFile(request, plan, row.Path, content, out var fileTruncated);
+                var hits = ScanFile(request, plan, row.Path, outcome.Content!, out var fileTruncated);
                 total += hits.ReportedTotal;
                 if (fileTruncated) truncated = true;
 

@@ -54,7 +54,15 @@ public sealed class SqliteIndex : IAsyncDisposable
     private readonly SqliteConnection _syncReader;
     private readonly object _syncReaderGate = new();
 
-    private bool _disposed;
+    /// <summary>
+    /// 0 = live, 1 = disposed. Flipped atomically via
+    /// <see cref="Interlocked.Exchange(ref int, int)"/> in
+    /// <see cref="DisposeAsync"/> so concurrent disposal callers serialize
+    /// on the first winner; <see cref="ThrowIfDisposed"/> uses
+    /// <see cref="Volatile.Read(ref int)"/> for ordered reads from HTTP
+    /// threads after the daemon enters shutdown.
+    /// </summary>
+    private int _disposed;
 
     private SqliteIndex(string dbPath, SqliteConnection writer, SqliteConnection syncReader)
     {
@@ -277,7 +285,7 @@ public sealed class SqliteIndex : IAsyncDisposable
 
     internal void ReturnReader(SqliteConnection conn)
     {
-        if (_disposed)
+        if (Volatile.Read(ref _disposed) != 0)
         {
             conn.Dispose();
             return;
@@ -326,9 +334,26 @@ public sealed class SqliteIndex : IAsyncDisposable
     }
 
     /// <summary>
-    /// Upsert the file row keyed by <paramref name="path"/> and replace its
-    /// <c>code_fts</c> content. Returns the assigned <c>file_id</c>.
+    /// Upsert the file row keyed by <paramref name="path"/> and replace the
+    /// corresponding <c>code_fts</c> posting list. Returns the assigned
+    /// <c>file_id</c>.
     /// </summary>
+    /// <param name="scope">Open writer scope. Required.</param>
+    /// <param name="path">Repository-relative POSIX path.</param>
+    /// <param name="mtimeUtc">Stat'd mtime, seconds since Unix epoch, UTC.</param>
+    /// <param name="sizeBytes">File length in bytes at index time.</param>
+    /// <param name="sha256">Raw 32-byte content hash.</param>
+    /// <param name="language">Best-guess language slug, or <c>null</c>.</param>
+    /// <param name="indexedAt">Wall-clock timestamp, seconds since Unix epoch, UTC.</param>
+    /// <param name="textForTokenization">
+    /// Decoded file text fed to the FTS5 trigram tokenizer. Under schema v2
+    /// <c>code_fts</c> is <em>contentless</em> (<c>content = ''</c>): this
+    /// parameter is tokenized at write time to build the posting list, and
+    /// then discarded — only trigram postings are persisted. Snippet
+    /// rehydration at query time re-reads the file from disk via
+    /// <see cref="FileContentProvider"/>. Callers should pass the raw
+    /// decoded text (not a pre-chunked subset).
+    /// </param>
     public static long UpsertFile(
         WriterScope scope,
         string path,
@@ -337,7 +362,7 @@ public sealed class SqliteIndex : IAsyncDisposable
         ReadOnlySpan<byte> sha256,
         string? language,
         long indexedAt,
-        string content)
+        string textForTokenization)
     {
         if (scope is null) throw new ArgumentNullException(nameof(scope));
         var conn = scope.Connection;
@@ -366,9 +391,11 @@ public sealed class SqliteIndex : IAsyncDisposable
             fileId = Convert.ToInt64(cmd.ExecuteScalar());
         }
 
-        // Replace the code_fts row. FTS5 external-content is not used here — we
-        // INSERT the raw content into the virtual table and rely on the
-        // rowid=file_id coupling to recover the text during query.
+        // Replace the code_fts posting list. The column name "content" below
+        // is the FTS5 virtual-table column alias, not a stored value — under
+        // the contentless v2 schema (content = '') FTS5 tokenizes the text
+        // into trigrams and stores only the inverted index. The raw string is
+        // never persisted; CodeQueryExecutor rehydrates snippets from disk.
         using (var cmd = conn.CreateCommand())
         {
             cmd.Transaction = scope.Transaction;
@@ -381,7 +408,7 @@ public sealed class SqliteIndex : IAsyncDisposable
             cmd.Transaction = scope.Transaction;
             cmd.CommandText = "INSERT INTO code_fts(rowid, content) VALUES($id, $content);";
             cmd.Parameters.AddWithValue("$id", fileId);
-            cmd.Parameters.AddWithValue("$content", content);
+            cmd.Parameters.AddWithValue("$content", textForTokenization);
             cmd.ExecuteNonQuery();
         }
 
@@ -686,19 +713,53 @@ public sealed class SqliteIndex : IAsyncDisposable
         }
     }
 
-    public async ValueTask DisposeAsync()
+    /// <summary>
+    /// Default deadline for the WAL-checkpoint-on-close step inside
+    /// <see cref="DisposeAsync"/>. The checkpoint is best-effort: if an
+    /// in-flight reader holds the WAL from truncating within this window,
+    /// close proceeds anyway — the next daemon start naturally truncates
+    /// the WAL on its first write.
+    /// </summary>
+    public static TimeSpan DefaultShutdownTimeout { get; } = TimeSpan.FromSeconds(5);
+
+    /// <summary>
+    /// Close the writer, sync reader, and every pooled reader. Idempotent
+    /// under concurrent callers. Uses <see cref="DefaultShutdownTimeout"/>
+    /// as the deadline for the WAL checkpoint.
+    /// </summary>
+    public ValueTask DisposeAsync() => DisposeAsync(DefaultShutdownTimeout);
+
+    /// <summary>
+    /// Variant of <see cref="DisposeAsync()"/> with an explicit
+    /// WAL-checkpoint deadline. Primarily for tests and callers with
+    /// bespoke shutdown budgets; production code should use the
+    /// parameterless form.
+    /// </summary>
+    public async ValueTask DisposeAsync(TimeSpan shutdownTimeout)
     {
-        if (_disposed) return;
-        _disposed = true;
+        // Atomic idempotency — the first dispose wins; racers bail out.
+        if (Interlocked.Exchange(ref _disposed, 1) == 1) return;
 
         // WAL checkpoint: flush the WAL to the main DB file before closing.
         // This bounds the -wal file size across daemon restarts and gives
-        // the next open a clean start.
+        // the next open a clean start. The checkpoint runs on a background
+        // thread and we only wait shutdownTimeout for it — a pathological
+        // contending reader cannot wedge shutdown indefinitely. Any
+        // un-checkpointed WAL is flushed on next open and does not risk
+        // data loss (the index is a derived artifact in any case).
         try
         {
-            using var cmd = _writer.CreateCommand();
-            cmd.CommandText = "PRAGMA wal_checkpoint(TRUNCATE);";
-            cmd.ExecuteNonQuery();
+            var checkpointTask = Task.Run(() =>
+            {
+                using var cmd = _writer.CreateCommand();
+                cmd.CommandText = "PRAGMA wal_checkpoint(TRUNCATE);";
+                cmd.ExecuteNonQuery();
+            });
+            var completed = await Task.WhenAny(checkpointTask, Task.Delay(shutdownTimeout))
+                .ConfigureAwait(false);
+            // Swallow faults from the checkpoint itself — best-effort.
+            if (completed == checkpointTask)
+                try { await checkpointTask.ConfigureAwait(false); } catch { }
         }
         catch { /* best-effort — the index is a derived artifact */ }
 
@@ -723,17 +784,14 @@ public sealed class SqliteIndex : IAsyncDisposable
 
         _writerLock.Dispose();
         _readerLock.Dispose();
-
-        // Help the caller-initiated WAL checkpoint on close by nulling out any
-        // finalizer-retained references — the wrapper has no unmanaged state
-        // of its own beyond the SQLite handles already disposed above.
     }
 
     // ----- helpers -----
 
     private void ThrowIfDisposed()
     {
-        if (_disposed) throw new ObjectDisposedException(nameof(SqliteIndex));
+        if (Volatile.Read(ref _disposed) != 0)
+            throw new ObjectDisposedException(nameof(SqliteIndex));
     }
 
     private static SqliteConnection OpenWriter(string dbPath)
