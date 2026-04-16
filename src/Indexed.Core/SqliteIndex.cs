@@ -601,6 +601,80 @@ public sealed class SqliteIndex : IAsyncDisposable
         return list;
     }
 
+    /// <summary>
+    /// Run a bounded FTS5 segment merge against <c>code_fts</c> and
+    /// <c>prose_fts</c>. Each call consumes at most <paramref name="pageBudget"/>
+    /// pages of work per table, so a single call is guaranteed to release the
+    /// writer lock within a small, bounded time window. Repeat calls
+    /// approximate a full <c>optimize</c> without the stall.
+    /// </summary>
+    /// <param name="pageBudget">
+    /// Upper bound on the number of FTS5 data pages the merger may touch per
+    /// table. Must be positive. Typical values: 256 for idle-time work, 1024
+    /// for a final merge on shutdown.
+    /// </param>
+    /// <param name="cancellationToken">
+    /// Cancels the wait for the writer lock. Merge statements themselves run
+    /// synchronously once the transaction is open; SQLite does not honor
+    /// cancellation mid-statement.
+    /// </param>
+    /// <remarks>
+    /// <para>
+    /// Acquires the standard <see cref="BeginWriteAsync"/> scope so merges
+    /// serialize correctly with <see cref="Indexed.Core.IncrementalIndexer"/>
+    /// commits. Commits on success; on exception the transaction is rolled
+    /// back via <see cref="WriterScope.Fail"/> before the scope disposes.
+    /// </para>
+    /// <para>
+    /// The FTS5 merge command is
+    /// <c>INSERT INTO &lt;fts&gt;(&lt;fts&gt;, rank) VALUES('merge', N)</c>
+    /// where <c>rank</c> is the built-in FTS5 virtual column and the positive
+    /// <c>N</c> caps the per-call page budget (see
+    /// <see href="https://sqlite.org/fts5.html#the_merge_command"/>). A
+    /// negative <c>N</c> (unbounded merge) is intentionally not supported
+    /// here — the whole point of this method is to bound writer-lock hold
+    /// time.
+    /// </para>
+    /// </remarks>
+    /// <example>
+    /// <code>
+    /// // Background optimizer tick: a bounded merge to reclaim segment bloat.
+    /// await index.RunFts5MergeAsync(pageBudget: 512, ct).ConfigureAwait(false);
+    /// </code>
+    /// </example>
+    public async ValueTask RunFts5MergeAsync(int pageBudget, CancellationToken cancellationToken = default)
+    {
+        if (pageBudget <= 0)
+            throw new ArgumentOutOfRangeException(nameof(pageBudget), pageBudget, "pageBudget must be positive");
+
+        ThrowIfDisposed();
+        await using var scope = await BeginWriteAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var conn = scope.Connection;
+
+            using (var cmd = conn.CreateCommand())
+            {
+                cmd.Transaction = scope.Transaction;
+                cmd.CommandText = "INSERT INTO code_fts(code_fts, rank) VALUES('merge', $n);";
+                cmd.Parameters.AddWithValue("$n", pageBudget);
+                cmd.ExecuteNonQuery();
+            }
+            using (var cmd = conn.CreateCommand())
+            {
+                cmd.Transaction = scope.Transaction;
+                cmd.CommandText = "INSERT INTO prose_fts(prose_fts, rank) VALUES('merge', $n);";
+                cmd.Parameters.AddWithValue("$n", pageBudget);
+                cmd.ExecuteNonQuery();
+            }
+        }
+        catch
+        {
+            scope.Fail();
+            throw;
+        }
+    }
+
     public async ValueTask DisposeAsync()
     {
         if (_disposed) return;
@@ -702,7 +776,12 @@ public sealed class SqliteIndex : IAsyncDisposable
     private static void ApplyConnectionPragmas(SqliteConnection conn)
     {
         using var cmd = conn.CreateCommand();
+        // PRAGMA page_size must run before any writes; SQLite silently ignores
+        // it on an existing DB. Left here so that cold rebuilds (initial create
+        // or PR-3 schema bump) pick up the larger page size, which packs FTS5
+        // postings slightly better on the kinds of content we index.
         cmd.CommandText = """
+            PRAGMA page_size=8192;
             PRAGMA journal_mode=WAL;
             PRAGMA synchronous=NORMAL;
             PRAGMA temp_store=MEMORY;

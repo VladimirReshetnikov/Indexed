@@ -72,6 +72,7 @@ internal sealed class DaemonHost : IAsyncDisposable
     private RepoWatcher? _repoWatcher;
     private HeadPoller? _headPoller;
     private ReconciliationScheduler? _reconciliationScheduler;
+    private IndexOptimizer? _indexOptimizer;
 
     public DaemonHost(DaemonOptions options, ILogger<DaemonHost>? logger = null)
     {
@@ -140,8 +141,19 @@ internal sealed class DaemonHost : IAsyncDisposable
             _eventQueue = new DebouncingEventQueue();
             _incrementalIndexer = new IncrementalIndexer(
                 _repo, _index, _eventQueue, effectiveExcludes, _logger);
+
+            // Background FTS5 segment merger. Subscribes to BatchCommitted so
+            // it only runs during idle periods that followed real write work.
+            _indexOptimizer = new IndexOptimizer(
+                _index,
+                _options.OptimizerInterval,
+                _options.OptimizerPageBudget,
+                _logger);
+
             _incrementalIndexer.BatchCommitted += () => _idleTimer?.Poke();
+            _incrementalIndexer.BatchCommitted += () => _indexOptimizer?.NotifyDirty();
             _incrementalIndexer.Start();
+            _indexOptimizer.Start();
 
             _repoWatcher = new RepoWatcher(
                 _repo.RepoRoot, _eventQueue, effectiveExcludes, _logger);
@@ -260,6 +272,15 @@ internal sealed class DaemonHost : IAsyncDisposable
             try { await _incrementalIndexer.DisposeAsync().ConfigureAwait(false); } catch { }
         }
         _eventQueue?.Dispose();
+
+        // Dispose the optimizer AFTER the incremental indexer so the final
+        // merge sees the last batch commit's dirty flag. Runs BEFORE the
+        // index is disposed — the final merge opens a writer scope.
+        if (_indexOptimizer is not null)
+        {
+            try { await _indexOptimizer.DisposeAsync().ConfigureAwait(false); } catch { }
+            _indexOptimizer = null;
+        }
 
         if (_index is not null)
         {

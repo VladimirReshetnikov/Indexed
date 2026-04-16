@@ -86,6 +86,21 @@ public sealed record DaemonOptions
     public bool UseDefaultIndexExcludes { get; init; } = true;
 
     /// <summary>
+    /// Interval between <see cref="Indexed.Core.IndexOptimizer"/> ticks.
+    /// Each tick runs a bounded FTS5 segment merge (see
+    /// <see cref="OptimizerPageBudget"/>) if there were batch commits since
+    /// the previous tick. Default 15 minutes.
+    /// </summary>
+    public TimeSpan OptimizerInterval { get; init; } = TimeSpan.FromMinutes(15);
+
+    /// <summary>
+    /// FTS5 page budget per optimizer tick. Caps how much work a single
+    /// merge can perform, bounding the time the writer lock is held. Default
+    /// 512 pages — typically completes in tens of milliseconds on SSDs.
+    /// </summary>
+    public int OptimizerPageBudget { get; init; } = 512;
+
+    /// <summary>
     /// Version string reported by <c>/status</c> and stamped in
     /// <c>daemon.json</c>. Defaults to the assembly's informational version.
     /// </summary>
