@@ -192,8 +192,9 @@ internal sealed class DaemonHost : IAsyncDisposable
             {
                 break;
             }
-            catch (HttpListenerException)
+            catch (HttpListenerException ex)
             {
+                _logger.LogWarning(ex, "HttpListener error — stopping request loop");
                 break;
             }
 
@@ -402,7 +403,7 @@ internal sealed class DaemonHost : IAsyncDisposable
             {
                 await WriteJsonAsync(
                     context.Response, 403,
-                    new ErrorResponse(IndexedErrorCode.BadRequest, "shutdown token missing or invalid"),
+                    new ErrorResponse(IndexedErrorCode.Unavailable, "shutdown token missing or invalid"),
                     IndexedJsonContext.Default.ErrorResponse)
                     .ConfigureAwait(false);
                 return;
@@ -415,8 +416,11 @@ internal sealed class DaemonHost : IAsyncDisposable
             return;
         }
 
-        context.Response.StatusCode = 404;
-        context.Response.OutputStream.Close();
+        await WriteJsonAsync(
+            context.Response, 404,
+            new ErrorResponse(IndexedErrorCode.BadRequest, $"unknown route: {method} {path}"),
+            IndexedJsonContext.Default.ErrorResponse)
+            .ConfigureAwait(false);
     }
 
     // ----- helpers -----
@@ -433,9 +437,12 @@ internal sealed class DaemonHost : IAsyncDisposable
 
     private Freshness BuildFreshness()
     {
-        string? head = null;
-        try { head = _repo!.GetHeadSha(); }
-        catch { /* transient git error — leave as null */ }
+        string? head = _headPoller?.LastKnownHead;
+        if (string.IsNullOrEmpty(head))
+        {
+            try { head = _repo!.GetHeadSha(); }
+            catch { /* transient git error — leave as null */ }
+        }
 
         string? indexedHead = null;
         DateTimeOffset? lastFullScan = null;

@@ -58,7 +58,7 @@ public sealed class FullScanIndexer
     private readonly GitRepository _repo;
     private readonly SqliteIndex _index;
     private readonly ILogger _logger;
-    private readonly IReadOnlyList<System.Text.RegularExpressions.Regex> _excludeRegexes;
+    private readonly ExcludeFilter _excludeFilter;
 
     /// <summary>
     /// Create an indexer for the given repo → index pair.
@@ -80,26 +80,7 @@ public sealed class FullScanIndexer
         _repo = repo ?? throw new ArgumentNullException(nameof(repo));
         _index = index ?? throw new ArgumentNullException(nameof(index));
         _logger = logger ?? NullLogger.Instance;
-        _excludeRegexes = CompileExcludes(excludeGlobs);
-    }
-
-    private static IReadOnlyList<System.Text.RegularExpressions.Regex> CompileExcludes(IReadOnlyList<string>? globs)
-    {
-        if (globs is null || globs.Count == 0) return Array.Empty<System.Text.RegularExpressions.Regex>();
-        var list = new System.Text.RegularExpressions.Regex[globs.Count];
-        for (var i = 0; i < globs.Count; i++) list[i] = PathGlob.Compile(globs[i]);
-        return list;
-    }
-
-    private bool IsExcluded(string relPath)
-    {
-        if (_excludeRegexes.Count == 0) return false;
-        var norm = relPath.Replace('\\', '/');
-        foreach (var rx in _excludeRegexes)
-        {
-            if (rx.IsMatch(norm)) return true;
-        }
-        return false;
+        _excludeFilter = new ExcludeFilter(excludeGlobs);
     }
 
     /// <summary>
@@ -126,7 +107,7 @@ public sealed class FullScanIndexer
             {
                 cancellationToken.ThrowIfCancellationRequested();
 
-                if (IsExcluded(relPath) || binaryAttrs.Contains(relPath) || _repo.IsLikelyBinary(relPath))
+                if (_excludeFilter.IsExcluded(relPath) || binaryAttrs.Contains(relPath) || _repo.IsLikelyBinary(relPath))
                 {
                     stats.Skipped++;
                     progress?.Report(new IndexProgress(relPath, stats.Indexed, stats.Skipped, stats.Total));
@@ -134,17 +115,21 @@ public sealed class FullScanIndexer
                 }
 
                 var full = Path.Combine(_repo.RepoRoot, relPath.Replace('/', Path.DirectorySeparatorChar));
-                byte[] bytes;
                 long mtimeUtc;
+                byte[] sha;
                 try
                 {
                     var info = new FileInfo(full);
                     if (!info.Exists) { stats.Skipped++; continue; }
                     if (info.Length > MaxIndexableFileBytes) { stats.Skipped++; continue; }
                     mtimeUtc = new DateTimeOffset(info.LastWriteTimeUtc, TimeSpan.Zero).ToUnixTimeSeconds();
-                    bytes = await File.ReadAllBytesAsync(full, cancellationToken).ConfigureAwait(false);
-                    // Re-check after read: the file may have grown between stat and read.
-                    if (bytes.LongLength > MaxIndexableFileBytes) { stats.Skipped++; continue; }
+
+                    // Compute SHA from a stream — avoids allocating the full byte[]
+                    // for unchanged files, which are the common case during re-scans.
+                    using (var shaStream = new FileStream(full, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize: 4096, useAsync: true))
+                    {
+                        sha = await SHA256.HashDataAsync(shaStream, cancellationToken).ConfigureAwait(false);
+                    }
                 }
                 catch (IOException ex)
                 {
@@ -159,12 +144,32 @@ public sealed class FullScanIndexer
                     continue;
                 }
 
-                var sha = SHA256.HashData(bytes);
                 var prior = _index.TryGetShaByPath(relPath);
                 if (AreEqual(prior, sha))
                 {
                     stats.Unchanged++;
                     progress?.Report(new IndexProgress(relPath, stats.Indexed, stats.Skipped, stats.Total));
+                    continue;
+                }
+
+                // SHA differs — read the full file for content extraction.
+                byte[] bytes;
+                try
+                {
+                    bytes = await File.ReadAllBytesAsync(full, cancellationToken).ConfigureAwait(false);
+                    // Re-check after read: the file may have grown between stat and read.
+                    if (bytes.LongLength > MaxIndexableFileBytes) { stats.Skipped++; continue; }
+                }
+                catch (IOException ex)
+                {
+                    _logger.LogDebug(ex, "skip {Path}: {Message}", relPath, ex.Message);
+                    stats.Skipped++;
+                    continue;
+                }
+                catch (UnauthorizedAccessException ex)
+                {
+                    _logger.LogDebug(ex, "skip {Path}: {Message}", relPath, ex.Message);
+                    stats.Skipped++;
                     continue;
                 }
 

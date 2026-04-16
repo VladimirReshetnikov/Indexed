@@ -164,7 +164,7 @@ internal sealed class DaemonClient : IDisposable
             return response.IsSuccessStatusCode;
         }
         catch (HttpRequestException) { return false; }
-        catch (TaskCanceledException) { return false; }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested) { return false; }
     }
 
     public void Dispose() => _http.Dispose();

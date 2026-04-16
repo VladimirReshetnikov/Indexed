@@ -50,9 +50,6 @@ public sealed class DebouncingEventQueue : IDisposable
     // Non-path events (HeadMoved, ReconciliationRequested) that bypass per-path debounce.
     private readonly List<IndexEvent> _pendingGlobal = new();
 
-    private readonly object _countLock = new();
-    private int _pendingCount;
-
     /// <summary>
     /// Create a debouncing queue with the specified timing parameters.
     /// </summary>
@@ -73,10 +70,7 @@ public sealed class DebouncingEventQueue : IDisposable
     /// Number of distinct pending events (paths + global) awaiting processing.
     /// Read by <c>BuildFreshness()</c> for the <c>PendingFileCount</c> slot.
     /// </summary>
-    public int PendingCount
-    {
-        get { lock (_countLock) return _pendingCount; }
-    }
+    public int PendingCount => _pendingPaths.Count + _pendingGlobal.Count;
 
     /// <summary>
     /// Push an event into the queue. Thread-safe; never blocks.
@@ -85,7 +79,6 @@ public sealed class DebouncingEventQueue : IDisposable
     {
         if (evt is null) return;
         _incoming.Writer.TryWrite(evt);
-        lock (_countLock) _pendingCount++;
     }
 
     /// <summary>
@@ -210,8 +203,6 @@ public sealed class DebouncingEventQueue : IDisposable
                 if (result.Count >= _maxBatchSize) break;
             }
         }
-
-        lock (_countLock) _pendingCount = _pendingPaths.Count + _pendingGlobal.Count;
 
         return result;
     }

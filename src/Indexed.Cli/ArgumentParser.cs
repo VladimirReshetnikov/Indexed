@@ -195,6 +195,8 @@ public static class ArgumentParser
     {
         if (!int.TryParse(s, out var n))
             throw new ArgumentParseException($"{flag} expects an integer; got '{s}'");
+        if (n < 0)
+            throw new ArgumentParseException($"{flag} must be non-negative; got {n}");
         return n;
     }
 

@@ -537,16 +537,53 @@ public sealed class SqliteIndex : IAsyncDisposable
     /// <c>code_fts</c>, <c>prose_fts</c>, and <c>files</c> for each ID.
     /// </summary>
     /// <remarks>
-    /// Used when a branch switch removes many files at once. Each call to
-    /// <see cref="DeleteFile"/> issues three statements; this method batches
-    /// them for efficiency but delegates per-row to the same logic.
+    /// Used when a branch switch removes many files at once. For small counts
+    /// (&lt;= 4) delegates to <see cref="DeleteFile"/>; larger batches use
+    /// parameterized <c>DELETE ... WHERE IN</c> clauses chunked at 500
+    /// parameters to stay under SQLite's default
+    /// <c>SQLITE_MAX_VARIABLE_NUMBER</c> (999).
     /// </remarks>
     public static void BulkDeleteFiles(WriterScope scope, IReadOnlyList<long> fileIds)
     {
         if (scope is null) throw new ArgumentNullException(nameof(scope));
         if (fileIds is null) throw new ArgumentNullException(nameof(fileIds));
-        foreach (var id in fileIds)
-            DeleteFile(scope, id);
+        if (fileIds.Count == 0) return;
+
+        // Small batches fall back to per-file delete for simplicity.
+        if (fileIds.Count <= 4)
+        {
+            foreach (var id in fileIds)
+                DeleteFile(scope, id);
+            return;
+        }
+
+        // Batch with parameterized IN clauses, chunked to stay under SQLite's
+        // default SQLITE_MAX_VARIABLE_NUMBER (999).
+        const int chunkSize = 500;
+        var conn = scope.Connection;
+
+        for (var offset = 0; offset < fileIds.Count; offset += chunkSize)
+        {
+            var count = Math.Min(chunkSize, fileIds.Count - offset);
+            var paramNames = new string[count];
+            for (var i = 0; i < count; i++)
+                paramNames[i] = $"$id{i}";
+            var inClause = string.Join(',', paramNames);
+
+            void BindAndExecute(string sql)
+            {
+                using var cmd = conn.CreateCommand();
+                cmd.Transaction = scope.Transaction;
+                cmd.CommandText = sql;
+                for (var i = 0; i < count; i++)
+                    cmd.Parameters.AddWithValue(paramNames[i], fileIds[offset + i]);
+                cmd.ExecuteNonQuery();
+            }
+
+            BindAndExecute($"DELETE FROM code_fts WHERE rowid IN ({inClause});");
+            BindAndExecute($"DELETE FROM prose_fts WHERE file_id IN ({inClause});");
+            BindAndExecute($"DELETE FROM files WHERE file_id IN ({inClause});");
+        }
     }
 
     /// <summary>Enumerate every <c>(file_id, path)</c> in stable order.</summary>

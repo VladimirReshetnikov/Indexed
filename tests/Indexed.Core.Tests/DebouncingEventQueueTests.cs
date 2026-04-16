@@ -125,12 +125,13 @@ public sealed class DebouncingEventQueueTests
         queue.Enqueue(new FileChanged("a.cs"));
         queue.Enqueue(new FileChanged("b.cs"));
 
-        // PendingCount is incremented on Enqueue.
-        Assert.True(queue.PendingCount >= 1);
-
+        // PendingCount is computed from absorbed items. Before DequeueAsync
+        // consumes the channel, items are not yet absorbed — count stays 0.
+        // After dequeue drains and flushes, count drops back to 0.
         var batch = await queue.DequeueAsync();
+        Assert.True(batch.Count >= 1);
 
-        // After dequeue, pending count should drop.
+        // After dequeue, pending count should be 0 — all items were flushed.
         Assert.Equal(0, queue.PendingCount);
     }
 

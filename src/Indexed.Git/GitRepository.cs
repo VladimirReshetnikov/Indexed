@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Text;
+using System.Threading;
 
 namespace Indexed.Git;
 
@@ -118,12 +119,12 @@ public sealed class GitRepository
     /// <see cref="Indexed.Abstractions.Freshness.CurrentHead"/> slot even
     /// when no index is present.
     /// </remarks>
-    public string GetHeadSha()
+    public string GetHeadSha(CancellationToken cancellationToken = default)
     {
         try
         {
             return GitProcess
-                .RunText(RepoRoot, new[] { "rev-parse", "HEAD" })
+                .RunText(RepoRoot, new[] { "rev-parse", "HEAD" }, cancellationToken: cancellationToken)
                 .Trim();
         }
         catch (GitProcessException ex) when (IsUnbornHead(ex))
@@ -144,13 +145,14 @@ public sealed class GitRepository
     /// <returns>
     /// The root commit SHA, or the empty string for an empty repository.
     /// </returns>
-    public string GetFirstCommitSha()
+    public string GetFirstCommitSha(CancellationToken cancellationToken = default)
     {
         try
         {
             var raw = GitProcess.RunText(
                 RepoRoot,
-                new[] { "rev-list", "--max-parents=0", "HEAD" });
+                new[] { "rev-list", "--max-parents=0", "HEAD" },
+                cancellationToken: cancellationToken);
 
             // git rev-list prints one SHA per line. Multiple root commits are
             // rare but possible (merged histories); take the last line, which
@@ -182,17 +184,17 @@ public sealed class GitRepository
     /// <see cref="IsLikelyBinary"/> and <see cref="GetBinaryAttrPaths"/>.
     /// </para>
     /// </remarks>
-    public IReadOnlyList<string> EnumerateFiles()
+    public IReadOnlyList<string> EnumerateFiles(CancellationToken cancellationToken = default)
     {
         var set = new SortedSet<string>(StringComparer.Ordinal);
 
-        foreach (var path in RunLsFilesZ(new[] { "ls-files", "-z" }))
+        foreach (var path in RunLsFilesZ(new[] { "ls-files", "-z" }, cancellationToken))
             set.Add(path);
 
         foreach (var path in RunLsFilesZ(new[]
         {
             "ls-files", "-z", "--others", "--exclude-standard",
-        }))
+        }, cancellationToken))
             set.Add(path);
 
         var result = new string[set.Count];
@@ -267,9 +269,32 @@ public sealed class GitRepository
     /// a file listed here is binary even if the NUL-scan would miss it.
     /// </para>
     /// </remarks>
-    public IReadOnlySet<string> GetBinaryAttrPaths()
+    public IReadOnlySet<string> GetBinaryAttrPaths(CancellationToken cancellationToken = default)
     {
-        var files = EnumerateFiles();
+        var files = EnumerateFiles(cancellationToken);
+        return GetBinaryAttrPaths(files, cancellationToken);
+    }
+
+    /// <summary>
+    /// Return the set of repository-relative paths that <c>.gitattributes</c>
+    /// explicitly marks as <c>binary</c>, checking only the supplied file list.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// This overload avoids a redundant <c>ls-files</c> subprocess when the
+    /// caller already has the file list (e.g. from a prior
+    /// <see cref="EnumerateFiles"/> call).
+    /// </para>
+    /// <para>
+    /// Invokes <c>git check-attr binary -z --stdin</c> with every path from
+    /// <paramref name="files"/>. A path appears in the returned set only when
+    /// the <c>binary</c> macro-attribute is explicitly <c>set</c>.
+    /// </para>
+    /// </remarks>
+    /// <param name="files">Repository-relative paths to check.</param>
+    /// <param name="cancellationToken">Token to cancel the underlying git process.</param>
+    public IReadOnlySet<string> GetBinaryAttrPaths(IReadOnlyList<string> files, CancellationToken cancellationToken = default)
+    {
         if (files.Count == 0) return new HashSet<string>(StringComparer.Ordinal);
 
         // git check-attr --stdin expects paths separated by \n in normal mode;
@@ -285,7 +310,8 @@ public sealed class GitRepository
         var outBytes = GitProcess.RunBytes(
             RepoRoot,
             new[] { "check-attr", "binary", "-z", "--stdin" },
-            stdinBuf.ToArray());
+            stdinBuf.ToArray(),
+            cancellationToken);
 
         // Output: repeated triples of NUL-terminated fields: path, attr, value.
         var result = new HashSet<string>(StringComparer.Ordinal);
@@ -318,14 +344,15 @@ public sealed class GitRepository
     /// <param name="fromCommit">Base commit (40-hex SHA or any tree-ish).</param>
     /// <param name="toCommit">Target commit.</param>
     /// <returns>One entry per changed path. Empty when the trees are identical.</returns>
-    public IReadOnlyList<DiffTreeEntry> GetDiffTree(string fromCommit, string toCommit)
+    public IReadOnlyList<DiffTreeEntry> GetDiffTree(string fromCommit, string toCommit, CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrEmpty(fromCommit)) throw new ArgumentException("fromCommit is required", nameof(fromCommit));
         if (string.IsNullOrEmpty(toCommit)) throw new ArgumentException("toCommit is required", nameof(toCommit));
 
         var bytes = GitProcess.RunBytes(
             RepoRoot,
-            new[] { "diff-tree", "-r", "--name-status", "--no-commit-id", "-z", fromCommit, toCommit });
+            new[] { "diff-tree", "-r", "--name-status", "--no-commit-id", "-z", fromCommit, toCommit },
+            cancellationToken: cancellationToken);
 
         var fields = SplitNullTerminated(bytes);
         var result = new List<DiffTreeEntry>();
@@ -398,9 +425,9 @@ public sealed class GitRepository
     /// separately for the incremental reconciliation pass which needs to diff
     /// the untracked set against the index without re-enumerating tracked files.
     /// </remarks>
-    public IReadOnlyList<string> GetUntrackedFiles()
+    public IReadOnlyList<string> GetUntrackedFiles(CancellationToken cancellationToken = default)
     {
-        return RunLsFilesZ(new[] { "ls-files", "-z", "--others", "--exclude-standard" });
+        return RunLsFilesZ(new[] { "ls-files", "-z", "--others", "--exclude-standard" }, cancellationToken);
     }
 
     /// <summary>
@@ -460,9 +487,9 @@ public sealed class GitRepository
         }
     }
 
-    private List<string> RunLsFilesZ(string[] args)
+    private List<string> RunLsFilesZ(string[] args, CancellationToken cancellationToken = default)
     {
-        var bytes = GitProcess.RunBytes(RepoRoot, args);
+        var bytes = GitProcess.RunBytes(RepoRoot, args, cancellationToken: cancellationToken);
         return SplitNullTerminated(bytes);
     }
 

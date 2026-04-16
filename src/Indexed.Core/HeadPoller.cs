@@ -36,6 +36,13 @@ public sealed class HeadPoller : IDisposable
     private int _consecutiveErrors;
 
     /// <summary>
+    /// Last known HEAD SHA, updated on each successful poll tick. Read by
+    /// <c>BuildFreshness()</c> to avoid spawning <c>git rev-parse HEAD</c>
+    /// per HTTP request.
+    /// </summary>
+    public string? LastKnownHead => _lastKnownHead;
+
+    /// <summary>
     /// Create a poller.
     /// </summary>
     /// <param name="repo">Repository to poll.</param>

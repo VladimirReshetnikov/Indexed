@@ -24,6 +24,8 @@ namespace Indexed.Core;
 /// </remarks>
 internal static class TextDecoder
 {
+    private static readonly Encoding Utf32Be = new UTF32Encoding(bigEndian: true, byteOrderMark: false);
+
     /// <summary>
     /// Decode a byte buffer to a string, detecting and stripping any BOM.
     /// </summary>
@@ -44,7 +46,7 @@ internal static class TextDecoder
             && bytes[0] == 0x00 && bytes[1] == 0x00
             && bytes[2] == 0xFE && bytes[3] == 0xFF)
         {
-            return GetUtf32Be().GetString(bytes.Slice(4));
+            return Utf32Be.GetString(bytes.Slice(4));
         }
 
         // UTF-16 LE BOM: FF FE
@@ -70,9 +72,4 @@ internal static class TextDecoder
         return Encoding.UTF8.GetString(bytes);
     }
 
-    /// <summary>
-    /// Get or create a UTF-32 Big Endian encoding instance.
-    /// </summary>
-    private static Encoding GetUtf32Be()
-        => new UTF32Encoding(bigEndian: true, byteOrderMark: false);
 }

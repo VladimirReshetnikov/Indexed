@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
-using System.Text.RegularExpressions;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 
@@ -34,7 +33,7 @@ public sealed class RepoWatcher : IDisposable
     private readonly string _repoRoot;
     private readonly DebouncingEventQueue _queue;
     private readonly ILogger _logger;
-    private readonly IReadOnlyList<Regex> _excludeRegexes;
+    private readonly ExcludeFilter _excludeFilter;
     private FileSystemWatcher? _watcher;
 
     /// <summary>
@@ -53,7 +52,7 @@ public sealed class RepoWatcher : IDisposable
         _repoRoot = repoRoot ?? throw new ArgumentNullException(nameof(repoRoot));
         _queue = queue ?? throw new ArgumentNullException(nameof(queue));
         _logger = logger ?? NullLogger.Instance;
-        _excludeRegexes = CompileExcludes(excludeGlobs);
+        _excludeFilter = new ExcludeFilter(excludeGlobs);
     }
 
     /// <summary>
@@ -153,19 +152,8 @@ public sealed class RepoWatcher : IDisposable
             return true;
 
         // Skip paths matching exclude globs.
-        foreach (var rx in _excludeRegexes)
-        {
-            if (rx.IsMatch(relPath)) return true;
-        }
+        if (_excludeFilter.IsExcluded(relPath)) return true;
 
         return false;
-    }
-
-    private static IReadOnlyList<Regex> CompileExcludes(IReadOnlyList<string>? globs)
-    {
-        if (globs is null || globs.Count == 0) return Array.Empty<Regex>();
-        var list = new Regex[globs.Count];
-        for (var i = 0; i < globs.Count; i++) list[i] = PathGlob.Compile(globs[i]);
-        return list;
     }
 }

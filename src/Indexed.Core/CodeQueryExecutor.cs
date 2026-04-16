@@ -62,7 +62,7 @@ public sealed class CodeQueryExecutor
         var total = 0;
 
         var includeRegex = CompileOptionalGlob(request.PathGlob, include: true);
-        var excludeRegexes = CompileExcludes(request.ExcludeGlob);
+        var excludeFilter = new ExcludeFilter(request.ExcludeGlob);
 
         var candidates = await _index
             .QueryCodeCandidatesAsync(plan.Fts5MatchExpression, cancellationToken)
@@ -86,7 +86,7 @@ public sealed class CodeQueryExecutor
             foreach (var row in rows)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                if (!PathAllowed(row.Path, includeRegex, excludeRegexes)) continue;
+                if (!PathAllowed(row.Path, includeRegex, excludeFilter)) continue;
 
                 var hits = ScanFile(request, plan, row, out var fileTruncated);
                 total += hits.ReportedTotal;
@@ -107,14 +107,11 @@ public sealed class CodeQueryExecutor
         return new ExecuteResult(matches, truncated, total, sw.ElapsedMilliseconds);
     }
 
-    private static bool PathAllowed(string path, Regex? include, IReadOnlyList<Regex> excludes)
+    private static bool PathAllowed(string path, Regex? include, ExcludeFilter excludeFilter)
     {
         var norm = path.Replace('\\', '/');
         if (include is not null && !include.IsMatch(norm)) return false;
-        foreach (var ex in excludes)
-        {
-            if (ex.IsMatch(norm)) return false;
-        }
+        if (excludeFilter.IsExcluded(path)) return false;
         return true;
     }
 
@@ -122,14 +119,6 @@ public sealed class CodeQueryExecutor
     {
         if (string.IsNullOrEmpty(glob)) return null;
         return PathGlob.Compile(glob);
-    }
-
-    private static IReadOnlyList<Regex> CompileExcludes(IReadOnlyList<string>? globs)
-    {
-        if (globs is null || globs.Count == 0) return Array.Empty<Regex>();
-        var list = new Regex[globs.Count];
-        for (var i = 0; i < globs.Count; i++) list[i] = PathGlob.Compile(globs[i]);
-        return list;
     }
 
     // ----- scanning -----

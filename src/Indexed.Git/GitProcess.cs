@@ -127,7 +127,6 @@ internal static class GitProcess
             RedirectStandardInput = stdin is not null,
             UseShellExecute = false,
             CreateNoWindow = true,
-            StandardOutputEncoding = Encoding.UTF8,
             StandardErrorEncoding = Encoding.UTF8,
         };
         foreach (var a in arguments) psi.ArgumentList.Add(a);
@@ -176,6 +175,7 @@ internal static class GitProcess
             if (!process.WaitForExit((int)ProcessTimeout.TotalMilliseconds))
             {
                 TryKill(process);
+                try { stderrTask.GetAwaiter().GetResult(); } catch { }
                 throw new GitProcessException(Executable, arguments, -1,
                     $"git process did not exit within {ProcessTimeout.TotalSeconds}s — killed");
             }
@@ -184,6 +184,7 @@ internal static class GitProcess
         catch (OperationCanceledException)
         {
             TryKill(process);
+            try { stderrTask.GetAwaiter().GetResult(); } catch { }
             throw;
         }
 

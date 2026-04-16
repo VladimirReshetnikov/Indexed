@@ -2,7 +2,6 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Security.Cryptography;
-using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using Indexed.Git;
@@ -40,7 +39,7 @@ public sealed class IncrementalIndexer : IAsyncDisposable
     private readonly SqliteIndex _index;
     private readonly DebouncingEventQueue _queue;
     private readonly ILogger _logger;
-    private readonly IReadOnlyList<Regex> _excludeRegexes;
+    private readonly ExcludeFilter _excludeFilter;
     private readonly CancellationTokenSource _cts = new();
     private Task? _workerTask;
     private bool _disposed;
@@ -73,7 +72,7 @@ public sealed class IncrementalIndexer : IAsyncDisposable
         _index = index ?? throw new ArgumentNullException(nameof(index));
         _queue = queue ?? throw new ArgumentNullException(nameof(queue));
         _logger = logger ?? NullLogger.Instance;
-        _excludeRegexes = CompileExcludes(excludeGlobs);
+        _excludeFilter = new ExcludeFilter(excludeGlobs);
     }
 
     /// <summary>
@@ -167,7 +166,7 @@ public sealed class IncrementalIndexer : IAsyncDisposable
                     break;
 
                 case FileChanged fc:
-                    if (!IsExcluded(fc.RelativePath))
+                    if (!_excludeFilter.IsExcluded(fc.RelativePath))
                         toUpsert.Add(fc.RelativePath);
                     break;
 
@@ -221,21 +220,53 @@ public sealed class IncrementalIndexer : IAsyncDisposable
                 {
                     ct.ThrowIfCancellationRequested();
 
-                    if (IsExcluded(relPath) || IsBinary(relPath))
+                    if (_excludeFilter.IsExcluded(relPath) || IsBinary(relPath))
                     {
                         skipped++;
                         continue;
                     }
 
                     var full = Path.Combine(_repo.RepoRoot, relPath.Replace('/', Path.DirectorySeparatorChar));
-                    byte[] bytes;
                     long mtimeUtc;
+                    byte[] sha;
                     try
                     {
                         var info = new FileInfo(full);
                         if (!info.Exists) { skipped++; continue; }
                         if (info.Length > MaxIndexableFileBytes) { skipped++; continue; }
                         mtimeUtc = new DateTimeOffset(info.LastWriteTimeUtc, TimeSpan.Zero).ToUnixTimeSeconds();
+
+                        // Compute SHA from a stream — avoids allocating the full byte[]
+                        // for unchanged files, which are the common case.
+                        using (var shaStream = new FileStream(full, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize: 4096, useAsync: true))
+                        {
+                            sha = await SHA256.HashDataAsync(shaStream, ct).ConfigureAwait(false);
+                        }
+                    }
+                    catch (IOException ex)
+                    {
+                        _logger.LogDebug(ex, "skip {Path}: {Message}", relPath, ex.Message);
+                        skipped++;
+                        continue;
+                    }
+                    catch (UnauthorizedAccessException ex)
+                    {
+                        _logger.LogDebug(ex, "skip {Path}: {Message}", relPath, ex.Message);
+                        skipped++;
+                        continue;
+                    }
+
+                    var prior = _index.TryGetShaByPath(relPath);
+                    if (prior.Length == sha.Length && prior.AsSpan().SequenceEqual(sha))
+                    {
+                        unchanged++;
+                        continue;
+                    }
+
+                    // SHA differs — read the full file for content extraction.
+                    byte[] bytes;
+                    try
+                    {
                         bytes = await File.ReadAllBytesAsync(full, ct).ConfigureAwait(false);
                         // Re-check after read: the file may have grown between stat and read.
                         if (bytes.LongLength > MaxIndexableFileBytes)
@@ -255,14 +286,6 @@ public sealed class IncrementalIndexer : IAsyncDisposable
                     {
                         _logger.LogDebug(ex, "skip {Path}: {Message}", relPath, ex.Message);
                         skipped++;
-                        continue;
-                    }
-
-                    var sha = SHA256.HashData(bytes);
-                    var prior = _index.TryGetShaByPath(relPath);
-                    if (prior.Length == sha.Length && prior.AsSpan().SequenceEqual(sha))
-                    {
-                        unchanged++;
                         continue;
                     }
 
@@ -411,22 +434,4 @@ public sealed class IncrementalIndexer : IAsyncDisposable
         return _repo.IsLikelyBinary(relPath);
     }
 
-    private bool IsExcluded(string relPath)
-    {
-        if (_excludeRegexes.Count == 0) return false;
-        var norm = relPath.Replace('\\', '/');
-        foreach (var rx in _excludeRegexes)
-        {
-            if (rx.IsMatch(norm)) return true;
-        }
-        return false;
-    }
-
-    private static IReadOnlyList<Regex> CompileExcludes(IReadOnlyList<string>? globs)
-    {
-        if (globs is null || globs.Count == 0) return Array.Empty<Regex>();
-        var list = new Regex[globs.Count];
-        for (var i = 0; i < globs.Count; i++) list[i] = PathGlob.Compile(globs[i]);
-        return list;
-    }
 }
