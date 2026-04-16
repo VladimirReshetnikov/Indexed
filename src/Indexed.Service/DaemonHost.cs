@@ -50,6 +50,13 @@ internal sealed class DaemonHost : IAsyncDisposable
     private readonly CancellationTokenSource _shutdownCts = new();
     private readonly DateTimeOffset _startedAt = DateTimeOffset.UtcNow;
 
+    /// <summary>
+    /// Limits in-flight request handlers to avoid unbounded <c>Task.Run</c>
+    /// fanout under load (e.g., agent hammering with concurrent searches).
+    /// </summary>
+    private readonly SemaphoreSlim _requestGate = new(MaxConcurrentRequests, MaxConcurrentRequests);
+    private const int MaxConcurrentRequests = 8;
+
     private GitRepository? _repo;
     private string? _repoId;
     private DaemonPaths? _paths;
@@ -193,7 +200,18 @@ internal sealed class DaemonHost : IAsyncDisposable
             _idleTimer?.Poke();
             try
             {
-                _ = Task.Run(() => HandleRequestSafelyAsync(context), ct);
+                _ = Task.Run(async () =>
+                {
+                    await _requestGate.WaitAsync(ct).ConfigureAwait(false);
+                    try
+                    {
+                        await HandleRequestSafelyAsync(context).ConfigureAwait(false);
+                    }
+                    finally
+                    {
+                        _requestGate.Release();
+                    }
+                }, ct);
             }
             catch (ObjectDisposedException)
             {
@@ -248,6 +266,7 @@ internal sealed class DaemonHost : IAsyncDisposable
         catch (ApplicationException) { /* not held by this thread */ }
         _singletonMutex?.Dispose();
 
+        _requestGate.Dispose();
         _shutdownCts.Dispose();
     }
 
@@ -298,8 +317,24 @@ internal sealed class DaemonHost : IAsyncDisposable
             SearchRequest? request;
             try
             {
+                // Cap request body to 64 KB to reject oversized payloads
+                // before they reach the JSON parser.
+                const int maxBodyBytes = 64 * 1024;
+                var body = req.InputStream;
+                if (req.ContentLength64 > maxBodyBytes)
+                {
+                    await WriteJsonAsync(
+                        context.Response, 400,
+                        new ErrorResponse(IndexedErrorCode.BadRequest,
+                            $"request body too large ({req.ContentLength64} bytes, limit {maxBodyBytes})"),
+                        IndexedJsonContext.Default.ErrorResponse)
+                        .ConfigureAwait(false);
+                    return;
+                }
+                var limitedStream = new LengthLimitingStream(body, maxBodyBytes);
+
                 request = await JsonSerializer
-                    .DeserializeAsync(req.InputStream, IndexedJsonContext.Default.SearchRequest, _shutdownCts.Token)
+                    .DeserializeAsync(limitedStream, IndexedJsonContext.Default.SearchRequest, _shutdownCts.Token)
                     .ConfigureAwait(false);
             }
             catch (JsonException ex)
@@ -307,6 +342,15 @@ internal sealed class DaemonHost : IAsyncDisposable
                 await WriteJsonAsync(
                     context.Response, 400,
                     new ErrorResponse(IndexedErrorCode.BadRequest, "malformed JSON body", ex.Message),
+                    IndexedJsonContext.Default.ErrorResponse)
+                    .ConfigureAwait(false);
+                return;
+            }
+            catch (InvalidOperationException ex) when (ex.Message.Contains("byte limit"))
+            {
+                await WriteJsonAsync(
+                    context.Response, 400,
+                    new ErrorResponse(IndexedErrorCode.BadRequest, "request body too large"),
                     IndexedJsonContext.Default.ErrorResponse)
                     .ConfigureAwait(false);
                 return;
@@ -455,18 +499,46 @@ internal sealed class DaemonHost : IAsyncDisposable
 #pragma warning restore CA1416
     }
 
+    /// <summary>
+    /// Bind an <see cref="HttpListener"/> to an OS-assigned ephemeral port.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <see cref="HttpListener"/> cannot bind port 0, so we pre-discover a
+    /// free port via <see cref="TcpListener"/>. Between closing the TCP
+    /// socket and opening the HTTP prefix another process may claim the same
+    /// port (TOCTOU race). The retry loop makes this practically reliable.
+    /// </para>
+    /// </remarks>
     private void BindListener()
     {
-        // Ask the OS for an ephemeral port by pre-opening a TcpListener on
-        // 127.0.0.1:0. HttpListener can't bind port 0 directly.
-        var tcp = new TcpListener(IPAddress.Loopback, 0);
-        tcp.Start();
-        var port = ((IPEndPoint)tcp.LocalEndpoint).Port;
-        tcp.Stop();
+        const int maxAttempts = 3;
 
-        _listener = new HttpListener();
-        _listener.Prefixes.Add($"http://127.0.0.1:{port}/");
-        _listener.Start();
+        for (var attempt = 1; attempt <= maxAttempts; attempt++)
+        {
+            // Ask the OS for an ephemeral port by pre-opening a TcpListener on
+            // 127.0.0.1:0. HttpListener can't bind port 0 directly.
+            var tcp = new TcpListener(IPAddress.Loopback, 0);
+            tcp.Start();
+            var port = ((IPEndPoint)tcp.LocalEndpoint).Port;
+            tcp.Stop();
+
+            var listener = new HttpListener();
+            listener.Prefixes.Add($"http://127.0.0.1:{port}/");
+            try
+            {
+                listener.Start();
+                _listener = listener;
+                return;
+            }
+            catch (HttpListenerException) when (attempt < maxAttempts)
+            {
+                _logger.LogWarning(
+                    "port {Port} was claimed between discovery and bind (attempt {Attempt}/{Max}); retrying",
+                    port, attempt, maxAttempts);
+                try { listener.Close(); } catch { }
+            }
+        }
     }
 
     private static int ExtractPort(HttpListener listener)
