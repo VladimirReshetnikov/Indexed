@@ -63,8 +63,10 @@ public enum IndexedErrorCode
     /// <summary>
     /// The requested capability is recognized but not yet implemented at the
     /// current staging level. Stage 2 uses this for <see cref="QueryMode.Prose"/>
-    /// and <see cref="QueryMode.Auto"/> until Stage 3 ships extractors. Maps
-    /// to HTTP 501.
+    /// and for <c>sortBy=relevance</c> (requires BM25 scoring that Stage 3
+    /// will add). <see cref="QueryMode.Auto"/> is <em>not</em> mapped to this
+    /// code — it is served as an alias of <see cref="QueryMode.Code"/>.
+    /// Maps to HTTP 501.
     /// </summary>
     [JsonStringEnumMemberName("not-implemented")]
     NotImplemented = 5,
@@ -76,4 +78,13 @@ public enum IndexedErrorCode
     /// </summary>
     [JsonStringEnumMemberName("internal")]
     Internal = 6,
+
+    /// <summary>
+    /// The request was well-formed but the caller lacks permission to perform
+    /// the requested action — currently used by the shutdown endpoint when the
+    /// caller-supplied token does not match the daemon's session token.
+    /// Maps to HTTP 403.
+    /// </summary>
+    [JsonStringEnumMemberName("forbidden")]
+    Forbidden = 7,
 }

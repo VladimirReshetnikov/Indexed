@@ -142,6 +142,53 @@ public sealed class HeadPollerTests : IDisposable
     }
 
     [Fact]
+    public async Task PollOnce_DeterministicallyDetectsHeadMove()
+    {
+        // Exercises the same logic as HeadMoved_DetectedAndEnqueued but
+        // without relying on the timer firing — flakes under CI load had
+        // the original test timing out on the `DequeueAsync` wait even
+        // though the commit landed well inside the 10 s budget.
+        var (repo, index) = SetupRepoAndIndex();
+        try
+        {
+            using var queue = new DebouncingEventQueue(
+                perPathDebounce: TimeSpan.FromMilliseconds(1),
+                globalBatchWindow: TimeSpan.FromMilliseconds(10));
+
+            var initialHead = repo.GetHeadSha();
+            index.SetMeta(SqliteSchema.MetaKey_IndexedHead, initialHead);
+
+            // Long interval — we want the timer to effectively never fire;
+            // PollOnce is our explicit trigger.
+            using var poller = new HeadPoller(repo, index, queue,
+                interval: TimeSpan.FromMinutes(10));
+
+            // Seed by calling PollOnce once against the unchanged HEAD; no
+            // event should be enqueued.
+            poller.PollOnce();
+            Assert.Equal(initialHead, poller.LastKnownHead);
+
+            // Move HEAD.
+            var repoPath = repo.RepoRoot;
+            File.WriteAllText(Path.Combine(repoPath, "b.txt"), "world");
+            RunGit(repoPath, "add", "b.txt");
+            RunGit(repoPath, "commit", "-q", "-m", "second");
+            var newHead = repo.GetHeadSha();
+
+            // Trigger the poll deterministically.
+            poller.PollOnce();
+            Assert.Equal(newHead, poller.LastKnownHead);
+
+            var batch = await queue.DequeueAsync();
+            Assert.Contains(batch, e => e is HeadMoved hm && hm.NewHead == newHead);
+        }
+        finally
+        {
+            await index.DisposeAsync();
+        }
+    }
+
+    [Fact]
     public async Task LastKnownHead_ReflectsInitialSeed()
     {
         var (repo, index) = SetupRepoAndIndex();

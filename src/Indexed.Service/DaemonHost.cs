@@ -51,11 +51,22 @@ internal sealed class DaemonHost : IAsyncDisposable
     private readonly DateTimeOffset _startedAt = DateTimeOffset.UtcNow;
 
     /// <summary>
-    /// Limits in-flight request handlers to avoid unbounded <c>Task.Run</c>
-    /// fanout under load (e.g., agent hammering with concurrent searches).
+    /// Limits in-flight <em>search</em> request handlers. Admin endpoints
+    /// (<c>/status</c>, <c>/shutdown</c>) bypass this gate via
+    /// <see cref="_adminGate"/> so a saturated search workload cannot stall
+    /// liveness probes or shutdown.
     /// </summary>
     private readonly SemaphoreSlim _requestGate = new(MaxConcurrentRequests, MaxConcurrentRequests);
     private const int MaxConcurrentRequests = 8;
+
+    /// <summary>
+    /// Separate concurrency gate for admin endpoints — /status and /shutdown.
+    /// Sized independently (and much smaller) so the admin path has its own
+    /// reservation of threads even when <see cref="_requestGate"/> is fully
+    /// occupied by concurrent /search handlers.
+    /// </summary>
+    private readonly SemaphoreSlim _adminGate = new(MaxConcurrentAdmin, MaxConcurrentAdmin);
+    private const int MaxConcurrentAdmin = 4;
 
     private GitRepository? _repo;
     private string? _repoId;
@@ -226,16 +237,21 @@ internal sealed class DaemonHost : IAsyncDisposable
             _idleTimer?.Poke();
             try
             {
+                // Classify admin endpoints (/status, /shutdown) so they ride
+                // the small, isolated _adminGate. A saturated search workload
+                // on _requestGate must not be able to starve liveness probes
+                // or block shutdown acknowledgement.
+                var gate = IsAdminEndpoint(context.Request) ? _adminGate : _requestGate;
                 _ = Task.Run(async () =>
                 {
-                    await _requestGate.WaitAsync(ct).ConfigureAwait(false);
+                    await gate.WaitAsync(ct).ConfigureAwait(false);
                     try
                     {
                         await HandleRequestSafelyAsync(context).ConfigureAwait(false);
                     }
                     finally
                     {
-                        _requestGate.Release();
+                        gate.Release();
                     }
                 }, ct);
             }
@@ -302,6 +318,7 @@ internal sealed class DaemonHost : IAsyncDisposable
         _singletonMutex?.Dispose();
 
         _requestGate.Dispose();
+        _adminGate.Dispose();
         _shutdownCts.Dispose();
     }
 
@@ -437,7 +454,7 @@ internal sealed class DaemonHost : IAsyncDisposable
             {
                 await WriteJsonAsync(
                     context.Response, 403,
-                    new ErrorResponse(IndexedErrorCode.Unavailable, "shutdown token missing or invalid"),
+                    new ErrorResponse(IndexedErrorCode.Forbidden, "shutdown token missing or invalid"),
                     IndexedJsonContext.Default.ErrorResponse)
                     .ConfigureAwait(false);
                 return;
@@ -618,10 +635,30 @@ internal sealed class DaemonHost : IAsyncDisposable
         return 0;
     }
 
+    /// <summary>
+    /// Classify a request as an admin-plane endpoint. Admin endpoints bypass
+    /// the search-request gate so liveness and shutdown remain responsive
+    /// when /search is saturated. The classification is by URL prefix only
+    /// — it runs before the handler resolves the route, so it must match
+    /// exactly the same set of paths that <c>HandleRequestAsync</c> treats
+    /// as admin.
+    /// </summary>
+    private static bool IsAdminEndpoint(HttpListenerRequest request)
+    {
+        var path = request.Url?.AbsolutePath;
+        return path is "/status" or "/shutdown";
+    }
+
+    // Keep the switch branches in sync with every member of IndexedErrorCode;
+    // a new code should surface either a sensible HTTP status here or fall
+    // through to 500 deliberately. Adding a new code without touching this
+    // table would silently return 500 — which is recoverable in practice
+    // but an observability regression (CLI can't branch).
     private static int MapErrorCodeToHttp(IndexedErrorCode code) => code switch
     {
         IndexedErrorCode.BadRequest => 400,
         IndexedErrorCode.PatternInvalid => 400,
+        IndexedErrorCode.Forbidden => 403,
         IndexedErrorCode.TimeoutExceeded => 504,
         IndexedErrorCode.RepoNotFound => 503,
         IndexedErrorCode.Unavailable => 503,

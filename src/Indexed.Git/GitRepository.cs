@@ -402,10 +402,30 @@ public sealed class GitRepository
                     i += 2;
                     break;
 
+                case 'B':
+                    // Broken pair: git detected a rename candidate but then
+                    // rejected it as implausible, so it represents the change
+                    // as a delete + add. For our reindex purposes the file
+                    // has changed; surface it as Modified (the safe side —
+                    // upsert will recompute the SHA and extract fresh tokens).
+                    // Two-field entry: status + path.
+                    if (i + 1 >= fields.Count) goto done;
+                    result.Add(new DiffTreeEntry(DiffStatus.Modified, fields[i + 1], null));
+                    i += 2;
+                    break;
+
+                case 'X':
+                    // "Unknown" — git's own bug-indicator status. We don't
+                    // know the shape of the change; skip and let the next
+                    // reconciliation pass repair the index. Still consume
+                    // two fields (status + path) to keep the parser in sync.
+                    if (i + 1 >= fields.Count) goto done;
+                    i += 2;
+                    break;
+
                 default:
-                    // Unknown status letter (X, B, etc.). These are two-field
-                    // entries (status + path) in git diff-tree output. Consume
-                    // both fields to keep the parser synchronized.
+                    // Any other status letter we don't recognize. Assume
+                    // the common two-field shape and skip to stay in sync.
                     if (i + 1 >= fields.Count) goto done;
                     i += 2;
                     break;

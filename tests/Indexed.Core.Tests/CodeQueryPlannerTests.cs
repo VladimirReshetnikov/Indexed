@@ -1,3 +1,4 @@
+using System;
 using Indexed.Abstractions;
 using Indexed.Core;
 using Xunit;
@@ -58,5 +59,40 @@ public sealed class CodeQueryPlannerTests
         var plan = CodeQueryPlanner.Build(new SearchRequest(
             Pattern: "f.o", Mode: QueryMode.Code, IsRegex: true));
         Assert.True(plan.FullScan);
+    }
+
+    [Fact]
+    public void RegexPattern_MatchTimeout_FollowsRequestTimeoutMs()
+    {
+        // Wire contract: a caller-supplied TimeoutMs must flow through to the
+        // compiled Regex so catastrophic-backtracking patterns trip within
+        // the request's overall deadline. Before this was wired, the
+        // Regex's MatchTimeout was a hard-coded 5 seconds regardless of how
+        // small a budget the caller passed.
+        var plan = CodeQueryPlanner.Build(new SearchRequest(
+            Pattern: @"Index\w+Manifest",
+            Mode: QueryMode.Code,
+            IsRegex: true,
+            TimeoutMs: 500));
+        Assert.NotNull(plan.Compiled);
+        Assert.Equal(TimeSpan.FromMilliseconds(500), plan.Compiled!.MatchTimeout);
+    }
+
+    [Fact]
+    public void RegexPattern_MatchTimeout_ClampedToFiftyMs_OnTinyBudget()
+    {
+        // A 1-ms TimeoutMs is theoretically legal (validator range [1, 30000])
+        // but would leave the regex engine unable to compile even trivial
+        // patterns. The planner clamps the per-match timeout up to 50 ms so
+        // the engine always gets a minimum working budget; the overall
+        // request still honors the 1-ms deadline separately via a linked
+        // CancellationTokenSource in SqliteSearchBackend.
+        var plan = CodeQueryPlanner.Build(new SearchRequest(
+            Pattern: @"a+b",
+            Mode: QueryMode.Code,
+            IsRegex: true,
+            TimeoutMs: 1));
+        Assert.NotNull(plan.Compiled);
+        Assert.Equal(TimeSpan.FromMilliseconds(50), plan.Compiled!.MatchTimeout);
     }
 }

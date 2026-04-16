@@ -60,10 +60,20 @@ public static class CodeQueryPlanner
         if (!request.CaseSensitive)
             opts |= System.Text.RegularExpressions.RegexOptions.IgnoreCase;
 
+        // Bound the per-match regex runtime to the caller's overall query
+        // deadline. A catastrophic-backtracking pattern like `(a+)+b` against
+        // a long non-matching line would otherwise spin in a single IsMatch
+        // call well past the executor's own deadline — the executor checks
+        // the token only between matches. Clamp to [50 ms, TimeoutMs] so a
+        // trivially small TimeoutMs still leaves the engine room to finish
+        // short patterns; TimeoutMs itself is already validated to
+        // [1, 30000] by the request validator.
+        var perMatch = TimeSpan.FromMilliseconds(Math.Max(50, request.TimeoutMs));
+
         System.Text.RegularExpressions.Regex compiled;
         try
         {
-            compiled = new System.Text.RegularExpressions.Regex(request.Pattern, opts, TimeSpan.FromSeconds(5));
+            compiled = new System.Text.RegularExpressions.Regex(request.Pattern, opts, perMatch);
         }
         catch (ArgumentException ex)
         {

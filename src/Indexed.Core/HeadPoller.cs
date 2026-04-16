@@ -34,6 +34,12 @@ public sealed class HeadPoller : IDisposable
     private readonly ILogger _logger;
     private readonly TimeSpan _interval;
     private Timer? _timer;
+    // _lastKnownHead is written by the timer thread in OnTick and read by
+    // HTTP request threads via LastKnownHead. All accesses go through
+    // Volatile.Read/Volatile.Write to guarantee the cross-thread reader sees
+    // either null or a fully-published reference (x86/x64 already do this in
+    // practice, but the invariant is explicit in the code so that weaker
+    // memory-model architectures do not silently regress).
     private string? _lastKnownHead;
     private int _consecutiveErrors;
 
@@ -42,7 +48,13 @@ public sealed class HeadPoller : IDisposable
     /// <c>BuildFreshness()</c> to avoid spawning <c>git rev-parse HEAD</c>
     /// per HTTP request.
     /// </summary>
-    public string? LastKnownHead => _lastKnownHead;
+    /// <remarks>
+    /// Uses <see cref="Volatile.Read{T}(ref readonly T)"/> to pair with the
+    /// <see cref="Volatile.Write{T}(ref T, T)"/> inside the polling callback;
+    /// the returned reference is either <see langword="null"/> or a fully
+    /// published SHA string, never a torn write.
+    /// </remarks>
+    public string? LastKnownHead => Volatile.Read(ref _lastKnownHead);
 
     /// <summary>
     /// Create a poller.
@@ -73,7 +85,7 @@ public sealed class HeadPoller : IDisposable
 
         // Seed the last-known HEAD from the index meta so we detect drift
         // immediately on the first tick.
-        _lastKnownHead = _index.GetMeta(SqliteSchema.MetaKey_IndexedHead);
+        Volatile.Write(ref _lastKnownHead, _index.GetMeta(SqliteSchema.MetaKey_IndexedHead));
 
         _timer = new Timer(OnTick, null, _interval, _interval);
         _logger.LogDebug("HeadPoller started, interval={Interval}ms", _interval.TotalMilliseconds);
@@ -84,6 +96,25 @@ public sealed class HeadPoller : IDisposable
     {
         _timer?.Dispose();
         _timer = null;
+    }
+
+    /// <summary>
+    /// Run the polling logic once on the calling thread. Intended for
+    /// deterministic testing — production code uses <see cref="Start"/>,
+    /// which schedules the same callback on a <see cref="Timer"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Seeds <c>_lastKnownHead</c> from persistent <c>indexed_head</c> meta
+    /// on the first call (matching <see cref="Start"/>'s behavior) so tests
+    /// don't have to reach inside the type to set up the baseline.
+    /// </para>
+    /// </remarks>
+    internal void PollOnce()
+    {
+        if (Volatile.Read(ref _lastKnownHead) is null)
+            Volatile.Write(ref _lastKnownHead, _index.GetMeta(SqliteSchema.MetaKey_IndexedHead));
+        OnTick(state: null);
     }
 
     private void OnTick(object? state)
@@ -109,7 +140,7 @@ public sealed class HeadPoller : IDisposable
 
             if (string.IsNullOrEmpty(currentHead)) return;
 
-            var indexedHead = _lastKnownHead;
+            var indexedHead = Volatile.Read(ref _lastKnownHead);
             if (string.Equals(currentHead, indexedHead, StringComparison.Ordinal))
                 return;
 
@@ -119,7 +150,7 @@ public sealed class HeadPoller : IDisposable
                 currentHead[..Math.Min(7, currentHead.Length)]);
 
             _queue.Enqueue(new HeadMoved(indexedHead ?? string.Empty, currentHead));
-            _lastKnownHead = currentHead;
+            Volatile.Write(ref _lastKnownHead, currentHead);
 
             // Reset error counter on success.
             _consecutiveErrors = 0;

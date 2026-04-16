@@ -108,7 +108,13 @@ internal static class GitProcess
             {
                 attempts++;
                 var delay = TimeSpan.FromMilliseconds(100 * (1 << (attempts - 1)));
-                Thread.Sleep(delay);
+                // Wait cancellably: if the caller's token fires during the
+                // back-off (shutdown, request deadline) we abandon the retry
+                // chain with OperationCanceledException instead of sleeping
+                // the full delay. Thread.Sleep would have held the pool
+                // thread hostage until the natural wake.
+                if (cancellationToken.WaitHandle.WaitOne(delay))
+                    cancellationToken.ThrowIfCancellationRequested();
             }
         }
     }

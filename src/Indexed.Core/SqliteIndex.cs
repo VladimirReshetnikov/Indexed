@@ -190,10 +190,62 @@ public sealed class SqliteIndex : IAsyncDisposable
     }
 
     /// <summary>Upsert a <c>meta</c> KV. Null <paramref name="value"/> deletes the row.</summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Transaction scope:</b> this overload runs on the writer connection
+    /// without participating in any active <see cref="WriterScope"/>. When a
+    /// batch owns a scope and wants the meta write to commit atomically with
+    /// the other rows it just upserted — for example, advancing
+    /// <see cref="SqliteSchema.MetaKey_IndexedHead"/> together with the files
+    /// that the new HEAD introduced — call the
+    /// <see cref="SetMeta(WriterScope, string, string?)"/> overload instead.
+    /// </para>
+    /// </remarks>
     public void SetMeta(string key, string? value)
     {
         ThrowIfDisposed();
         using var cmd = _writer.CreateCommand();
+        if (value is null)
+        {
+            cmd.CommandText = "DELETE FROM meta WHERE key = $k;";
+            cmd.Parameters.AddWithValue("$k", key);
+        }
+        else
+        {
+            cmd.CommandText = """
+                INSERT INTO meta(key, value) VALUES($k, $v)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value;
+                """;
+            cmd.Parameters.AddWithValue("$k", key);
+            cmd.Parameters.AddWithValue("$v", value);
+        }
+        cmd.ExecuteNonQuery();
+    }
+
+    /// <summary>
+    /// Upsert a <c>meta</c> KV inside the supplied writer transaction. Use
+    /// this overload when the meta write must land atomically with other
+    /// writes on the same scope (e.g. advancing <c>indexed_head</c> in
+    /// lockstep with the file rows the new HEAD introduced).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Rollback semantics match the rest of the scope: if the scope is
+    /// marked <see cref="WriterScope.Fail"/> or an exception escapes before
+    /// commit, this row never becomes visible. Contrast with the
+    /// <see cref="SetMeta(string, string?)"/> overload, which commits
+    /// immediately and can leave a half-applied state if the caller's batch
+    /// later rolls back.
+    /// </para>
+    /// </remarks>
+    /// <param name="scope">Active writer scope; command is bound to its transaction.</param>
+    /// <param name="key">Meta key.</param>
+    /// <param name="value">Value to write, or <see langword="null"/> to delete the row.</param>
+    public static void SetMeta(WriterScope scope, string key, string? value)
+    {
+        if (scope is null) throw new ArgumentNullException(nameof(scope));
+        using var cmd = scope.Connection.CreateCommand();
+        cmd.Transaction = scope.Transaction;
         if (value is null)
         {
             cmd.CommandText = "DELETE FROM meta WHERE key = $k;";
@@ -545,6 +597,41 @@ public sealed class SqliteIndex : IAsyncDisposable
     }
 
     /// <summary>
+    /// Per-file stat snapshot used by reconciliation to detect files whose
+    /// on-disk <c>mtime</c>/size has drifted from what the index last
+    /// recorded — a missed FSW modify event, for example.
+    /// </summary>
+    /// <param name="MtimeUtc">Stored <c>mtime_utc</c> (Unix seconds).</param>
+    /// <param name="SizeBytes">Stored <c>size_bytes</c>.</param>
+    public readonly record struct IndexedFileStat(long MtimeUtc, long SizeBytes);
+
+    /// <summary>
+    /// Return every <c>(path, mtimeUtc, sizeBytes)</c> triple from the
+    /// <c>files</c> table. Callers compare against disk stats to spot
+    /// modifications the filesystem watcher silently dropped (buffer
+    /// overflows, network drives, editors that rename-in-place while the
+    /// watcher is being re-armed, etc.).
+    /// </summary>
+    public async ValueTask<IReadOnlyDictionary<string, IndexedFileStat>> GetAllPathsWithStatAsync(
+        CancellationToken cancellationToken)
+    {
+        ThrowIfDisposed();
+        await using var lease = await RentReaderAsync(cancellationToken).ConfigureAwait(false);
+        using var cmd = lease.Connection.CreateCommand();
+        cmd.CommandText = "SELECT path, mtime_utc, size_bytes FROM files ORDER BY path;";
+        var dict = new Dictionary<string, IndexedFileStat>(StringComparer.Ordinal);
+        using var reader = await cmd.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            var path = reader.GetString(0);
+            var mtime = reader.GetInt64(1);
+            var size = reader.GetInt64(2);
+            dict[path] = new IndexedFileStat(mtime, size);
+        }
+        return dict;
+    }
+
+    /// <summary>
     /// Return the <c>file_id</c> for the given <paramref name="path"/>, or
     /// <c>null</c> when no such file is indexed.
     /// </summary>
@@ -767,7 +854,13 @@ public sealed class SqliteIndex : IAsyncDisposable
         try { await _syncReader.DisposeAsync().ConfigureAwait(false); } catch { }
 
         SqliteConnection[] readers;
-        await _readerLock.WaitAsync().ConfigureAwait(false);
+        // Bound the wait: a pathological reader-pool consumer (or a reader
+        // pool deadlocked by a caller that never disposed its lease) must
+        // not be able to wedge daemon shutdown indefinitely. If the lock
+        // does not come free within the shutdown window we proceed without
+        // draining the pool — SqliteConnection finalizers will close the
+        // handles opportunistically, and the process is exiting anyway.
+        var acquired = await _readerLock.WaitAsync(shutdownTimeout).ConfigureAwait(false);
         try
         {
             readers = _readers.ToArray();
@@ -775,7 +868,7 @@ public sealed class SqliteIndex : IAsyncDisposable
         }
         finally
         {
-            _readerLock.Release();
+            if (acquired) _readerLock.Release();
         }
         foreach (var r in readers)
         {

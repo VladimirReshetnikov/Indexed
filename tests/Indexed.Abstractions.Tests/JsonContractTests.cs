@@ -370,6 +370,7 @@ public sealed class JsonContractTests
     [InlineData(IndexedErrorCode.Unavailable, "\"unavailable\"")]
     [InlineData(IndexedErrorCode.NotImplemented, "\"not-implemented\"")]
     [InlineData(IndexedErrorCode.Internal, "\"internal\"")]
+    [InlineData(IndexedErrorCode.Forbidden, "\"forbidden\"")]
     public void IndexedErrorCode_WireStrings_AreKebabCase(IndexedErrorCode code, string expectedJson)
     {
         var json = JsonSerializer.Serialize(code, Context.IndexedErrorCode);

@@ -229,6 +229,16 @@ public sealed class DaemonHostIntegrationTests : IDisposable
         {
             using var resp = await http.PostAsync("shutdown", content: null);
             Assert.Equal(403, (int)resp.StatusCode);
+
+            // Error body should now carry the dedicated Forbidden code, not
+            // the previous Unavailable (which implied 503 semantics and
+            // would let clients treat the situation as retryable).
+            var body = await resp.Content.ReadAsStringAsync();
+            var err = System.Text.Json.JsonSerializer.Deserialize(
+                body,
+                IndexedJsonContext.Default.ErrorResponse);
+            Assert.NotNull(err);
+            Assert.Equal(IndexedErrorCode.Forbidden, err!.Code);
         }
         finally
         {

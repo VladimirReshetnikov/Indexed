@@ -203,6 +203,28 @@ public sealed class DebouncingEventQueueTests
     }
 
     [Fact]
+    public async Task PendingCount_ReachesZero_AfterDrain()
+    {
+        // Regression: before the dedicated Interlocked counter, PendingCount
+        // was computed from Dictionary.Count + List.Count — both of which
+        // are NOT safe to observe while the single consumer thread mutates
+        // the underlying collections. The visible count is now published
+        // via Volatile.Write on the consumer thread after every absorb /
+        // flush, so any cross-thread reader sees a stable scalar.
+        using var queue = new DebouncingEventQueue(
+            perPathDebounce: TimeSpan.FromMilliseconds(10),
+            globalBatchWindow: TimeSpan.FromMilliseconds(50));
+
+        for (var i = 0; i < 20; i++)
+            queue.Enqueue(new FileChanged($"f{i}.cs"));
+
+        // Drain — after Flush, PendingCount must fall to zero.
+        await queue.DequeueAsync();
+
+        Assert.Equal(0, queue.PendingCount);
+    }
+
+    [Fact]
     public async Task MaxBatchSize_AppliesToGlobalEvents_NotJustPerPath()
     {
         // Before the fix, _maxBatchSize was only checked inside the per-path

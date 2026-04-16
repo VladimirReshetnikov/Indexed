@@ -13,11 +13,12 @@ namespace Indexed.Abstractions;
 /// </para>
 /// <para>
 /// In <see cref="Code"/> mode, matches always carry <see cref="SpanKind.Code"/>
-/// and never carry a <see cref="MatchSpan"/>. In <see cref="Prose"/> mode,
-/// matches carry the extracted span's kind and a concrete start/end line range.
-/// In <see cref="Auto"/> mode both plans run in parallel; when a prose hit and
-/// a code hit collide on the same <c>(path, line)</c> the prose hit wins
-/// because it carries the richer metadata.
+/// and never carry a <see cref="MatchSpan"/>. <see cref="Prose"/> mode is not
+/// yet wired at Stage 2 and returns
+/// <see cref="IndexedErrorCode.NotImplemented"/>; it will become available once
+/// Stage 3 ships the prose extractor and span-kind tagging. At Stage 2,
+/// <see cref="Auto"/> (the DTO default) is executed as an alias of
+/// <see cref="Code"/> — Auto is not a merged/parallel plan at this stage.
 /// </para>
 /// <para>
 /// Wire format: kebab-case JSON strings (<c>"auto"</c>, <c>"code"</c>,
@@ -33,7 +34,9 @@ namespace Indexed.Abstractions;
 public enum QueryMode
 {
     /// <summary>
-    /// Run both code and prose plans and merge the results. This is the default.
+    /// The DTO default. At Stage 2 this is served as an alias of
+    /// <see cref="Code"/>; Stage 3 will run both the code and prose plans
+    /// and merge the results.
     /// </summary>
     [JsonStringEnumMemberName("auto")]
     Auto = 0,
@@ -51,6 +54,12 @@ public enum QueryMode
     /// of <see cref="SearchRequest.CaseSensitive"/>. Matches carry their
     /// extracted <see cref="SpanKind"/> and <see cref="MatchSpan"/>.
     /// </summary>
+    /// <remarks>
+    /// Not implemented at Stage 2: a request with
+    /// <see cref="QueryMode.Prose"/> returns
+    /// <see cref="IndexedErrorCode.NotImplemented"/>. Callers should use
+    /// <see cref="Code"/> explicitly until the Stage 3 extractor ships.
+    /// </remarks>
     [JsonStringEnumMemberName("prose")]
     Prose = 2,
 }

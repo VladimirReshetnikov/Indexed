@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Security.Cryptography;
 using System.Threading;
 using System.Threading.Tasks;
@@ -18,10 +19,13 @@ namespace Indexed.Core;
 /// <remarks>
 /// <para>
 /// Architecture: one long-running <see cref="Task"/> drains batches from the
-/// queue. Each batch is processed inside a single <see cref="WriterScope"/>
-/// (one SQLite transaction). This is the <strong>only writer</strong> to
-/// <see cref="SqliteIndex"/> after startup — no concurrent indexing. Matches
-/// proposal §10 (single-threaded writer).
+/// queue. Each batch is processed inside one or more <see cref="WriterScope"/>s
+/// (currently a delete scope followed by an upsert-plus-HEAD-advance scope).
+/// <see cref="SqliteIndex"/> serializes all writers via
+/// <see cref="SqliteIndex.BeginWriteAsync"/>, so concurrent writers from
+/// other subsystems (full-scan at startup, FTS merge in
+/// <see cref="IndexOptimizer"/>) are safe but cannot overlap. Matches
+/// proposal §10 (single writer per transaction; no intra-batch interleave).
 /// </para>
 /// <para>
 /// Event processing:
@@ -42,6 +46,14 @@ public sealed class IncrementalIndexer : IAsyncDisposable
     private readonly ExcludeFilter _excludeFilter;
     private readonly CancellationTokenSource _cts = new();
     private Task? _workerTask;
+
+    // Cached set of repo-relative paths whose .gitattributes explicitly mark
+    // them as `binary`. Seeded in Start() and refreshed at the top of
+    // reconciliation so later edits to .gitattributes propagate without a
+    // daemon restart. Held as a single IReadOnlySet<string> reference so the
+    // hot upsert loop reads it lock-free; the reference is swapped
+    // wholesale by RefreshBinaryAttrPaths — never mutated in place.
+    private IReadOnlySet<string> _binaryAttrPaths = new HashSet<string>(StringComparer.Ordinal);
 
     /// <summary>
     /// 0 = live, 1 = disposed. Flipped atomically via
@@ -104,7 +116,34 @@ public sealed class IncrementalIndexer : IAsyncDisposable
     public void Start()
     {
         if (_workerTask is not null) return;
+
+        // Seed the binary-attributes cache so the first batch already skips
+        // paths flagged by .gitattributes. A failure here is non-fatal —
+        // reconciliation will refresh the set later, and the NUL-scan
+        // fallback in IsLikelyBinary still catches common binary content.
+        try { RefreshBinaryAttrPaths(null); }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "initial binary-attr cache seed failed; will retry on reconciliation");
+        }
+
         _workerTask = Task.Run(() => WorkerLoopAsync(_cts.Token));
+    }
+
+    // Snapshot .gitattributes `binary` assignments into _binaryAttrPaths.
+    // Called from Start() (one-shot seed) and from ExpandReconciliationAsync
+    // (periodic refresh) so edits to .gitattributes eventually take effect
+    // without a daemon restart. If `files` is null, re-enumerates via
+    // `git ls-files`; callers that already have the file list should pass
+    // it to avoid the extra subprocess.
+    private void RefreshBinaryAttrPaths(IReadOnlyList<string>? files)
+    {
+        var set = files is null
+            ? _repo.GetBinaryAttrPaths(_cts.Token)
+            : _repo.GetBinaryAttrPaths(files, _cts.Token);
+        // Single-shot reference swap — readers on the worker thread pick up
+        // the new set on the next iteration without a lock.
+        Volatile.Write(ref _binaryAttrPaths, set);
     }
 
     /// <summary>
@@ -351,9 +390,12 @@ public sealed class IncrementalIndexer : IAsyncDisposable
                 // Land the HEAD advance inside the same commit as the
                 // upserts it described. If the upsert list was empty (a pure
                 // HeadMoved batch), this scope exists solely for the meta
-                // row and still commits atomically.
+                // row and still commits atomically. The WriterScope-bound
+                // overload binds the command to the scope's transaction so
+                // a later scope.Fail() correctly rolls the meta row back in
+                // lockstep with the files that new HEAD described.
                 if (newHead is not null)
-                    _index.SetMeta(SqliteSchema.MetaKey_IndexedHead, newHead);
+                    SqliteIndex.SetMeta(scope, SqliteSchema.MetaKey_IndexedHead, newHead);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -424,9 +466,17 @@ public sealed class IncrementalIndexer : IAsyncDisposable
         _logger.LogDebug("running reconciliation");
 
         // A: what git knows about.
-        var gitFiles = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var p in _repo.EnumerateFiles())
-            gitFiles.Add(p);
+        var gitFileList = _repo.EnumerateFiles().ToList();
+        var gitFiles = new HashSet<string>(gitFileList, StringComparer.Ordinal);
+
+        // Refresh the .gitattributes `binary` override cache while we already
+        // have the authoritative file list — this is the one place that gets
+        // called periodically without costing an extra ls-files.
+        try { RefreshBinaryAttrPaths(gitFileList); }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "binary-attr cache refresh during reconciliation failed");
+        }
 
         // B: what the index has.
         var indexed = await _index.GetAllPathsWithShaAsync(ct).ConfigureAwait(false);
@@ -443,6 +493,33 @@ public sealed class IncrementalIndexer : IAsyncDisposable
         {
             if (!gitFiles.Contains(p))
                 toDelete.Add(p);
+        }
+
+        // A ∩ B with stat drift: mtime or size on disk differs from what the
+        // index last recorded. The FileSystemWatcher is not 100% reliable —
+        // buffer overflows, network drives, editors that rename-in-place
+        // while the watcher is re-armed — any of these can drop a change
+        // notification. Reconciliation is the belt-and-suspenders catch.
+        IReadOnlyDictionary<string, SqliteIndex.IndexedFileStat>? stats = null;
+        try { stats = await _index.GetAllPathsWithStatAsync(ct).ConfigureAwait(false); }
+        catch (Exception ex) { _logger.LogDebug(ex, "stat-drift probe skipped"); }
+        if (stats is not null)
+        {
+            foreach (var p in gitFiles)
+            {
+                if (!stats.TryGetValue(p, out var stat)) continue; // handled by "missing from index" above
+                var full = Path.Combine(_repo.RepoRoot, p.Replace('/', Path.DirectorySeparatorChar));
+                try
+                {
+                    var info = new FileInfo(full);
+                    if (!info.Exists) continue;
+                    var diskMtime = new DateTimeOffset(info.LastWriteTimeUtc, TimeSpan.Zero).ToUnixTimeSeconds();
+                    if (diskMtime != stat.MtimeUtc || info.Length != stat.SizeBytes)
+                        toUpsert.Add(p);
+                }
+                catch (IOException) { /* transient — next reconciliation will retry */ }
+                catch (UnauthorizedAccessException) { /* skip */ }
+            }
         }
 
         // Check HEAD drift.
@@ -468,6 +545,15 @@ public sealed class IncrementalIndexer : IAsyncDisposable
 
     private bool IsBinary(string relPath)
     {
+        // Honor .gitattributes `binary` overrides first — a path that the
+        // user (or a template) has pinned as binary must be skipped even if
+        // the NUL-scan would not classify it that way (e.g. generated text
+        // assets marked binary to suppress diff noise). This mirrors the
+        // full-scan policy; before this fix the incremental path ignored
+        // the override, which meant a single FSW event would re-admit
+        // paths that the initial scan had correctly skipped.
+        if (Volatile.Read(ref _binaryAttrPaths).Contains(relPath))
+            return true;
         return _repo.IsLikelyBinary(relPath);
     }
 

@@ -184,6 +184,45 @@ public sealed class SqliteIndexTests : IDisposable
     }
 
     [Fact]
+    public async Task SetMeta_WithScope_CommitsAtomically()
+    {
+        // Scope-bound overload binds the INSERT to the scope's transaction
+        // so the row only becomes visible once the scope commits.
+        await using var index = SqliteIndex.OpenOrCreate(DbPath);
+
+        await using (var scope = await index.BeginWriteAsync())
+        {
+            SqliteIndex.SetMeta(scope, "scope-bound", "v1");
+            // A reader inside the scope should NOT see the row yet because
+            // the sync reader uses a separate connection (committed-state
+            // only). This is the defining property of the scope-bound
+            // overload.
+            Assert.Null(index.GetMeta("scope-bound"));
+        }
+
+        Assert.Equal("v1", index.GetMeta("scope-bound"));
+    }
+
+    [Fact]
+    public async Task SetMeta_WithScope_RollsBackOnFail()
+    {
+        // Regression: the scope-bound overload must participate in the
+        // scope's rollback path. Before the overload existed, callers used
+        // the plain overload which committed immediately on the writer
+        // connection — if a later statement in the batch failed and the
+        // scope rolled back, the meta row was still present (half-applied).
+        await using var index = SqliteIndex.OpenOrCreate(DbPath);
+
+        await using (var scope = await index.BeginWriteAsync())
+        {
+            SqliteIndex.SetMeta(scope, "rollback-test", "v1");
+            scope.Fail();
+        }
+
+        Assert.Null(index.GetMeta("rollback-test"));
+    }
+
+    [Fact]
     public async Task WriterScope_DoubleDispose_IsIdempotent()
     {
         // Regression test: before the Interlocked-flag guard, a second

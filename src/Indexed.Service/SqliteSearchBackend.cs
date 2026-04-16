@@ -119,6 +119,18 @@ internal sealed class SqliteSearchBackend : ISearchBackend
                 IndexedErrorCode.TimeoutExceeded,
                 $"search exceeded timeoutMs={request.TimeoutMs}"));
         }
+        catch (System.Text.RegularExpressions.RegexMatchTimeoutException)
+        {
+            // A catastrophic-backtracking pattern tripped the per-match
+            // timeout configured in CodeQueryPlanner. The caller deliberately
+            // bounded the overall request via TimeoutMs, so we surface this
+            // as a timeout rather than a generic 500 — the outcome is the
+            // same from the user's perspective: the pattern could not be
+            // evaluated within their deadline.
+            return SearchBackendResult.Fail(new ErrorResponse(
+                IndexedErrorCode.TimeoutExceeded,
+                $"regex match exceeded timeoutMs={request.TimeoutMs}"));
+        }
     }
 
     private static SearchBackendResult BadRequest(string message)

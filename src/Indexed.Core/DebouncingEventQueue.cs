@@ -50,6 +50,14 @@ public sealed class DebouncingEventQueue : IDisposable
     // Non-path events (HeadMoved, ReconciliationRequested) that bypass per-path debounce.
     private readonly List<IndexEvent> _pendingGlobal = new();
 
+    // Published count of pending events. Written only by the single consumer
+    // thread that owns Absorb/Flush; read cross-thread from
+    // BuildFreshness/HTTP handlers via PendingCount. Volatile-published so
+    // readers never observe torn or stale values — Dictionary.Count and
+    // List.Count are NOT safe to read while another thread mutates the
+    // collection, so we maintain a dedicated published scalar instead.
+    private int _pendingCount;
+
     /// <summary>
     /// Create a debouncing queue with the specified timing parameters.
     /// </summary>
@@ -70,7 +78,18 @@ public sealed class DebouncingEventQueue : IDisposable
     /// Number of distinct pending events (paths + global) awaiting processing.
     /// Read by <c>BuildFreshness()</c> for the <c>PendingFileCount</c> slot.
     /// </summary>
-    public int PendingCount => _pendingPaths.Count + _pendingGlobal.Count;
+    /// <remarks>
+    /// <para>
+    /// This is a point-in-time snapshot published by the single consumer
+    /// thread after every <see cref="Absorb"/> / <see cref="Flush"/> step. It
+    /// is the published count as of the most recent Absorb/Flush; it is
+    /// <em>not</em> updated while events sit in the unbounded channel
+    /// (<see cref="_incoming"/>) prior to absorption. Callers that need a
+    /// strict "nothing queued anywhere" signal must also observe idle/quiesce
+    /// externally.
+    /// </para>
+    /// </remarks>
+    public int PendingCount => Volatile.Read(ref _pendingCount);
 
     /// <summary>
     /// Push an event into the queue. Thread-safe; never blocks.
@@ -190,6 +209,18 @@ public sealed class DebouncingEventQueue : IDisposable
                 }
                 break;
         }
+
+        PublishPendingCount();
+    }
+
+    // Called at the end of every Absorb/Flush on the single consumer thread
+    // so that cross-thread readers of PendingCount see the collection size
+    // as a single atomic scalar rather than stitching together the
+    // non-thread-safe Count properties of the underlying Dictionary and
+    // List.
+    private void PublishPendingCount()
+    {
+        Volatile.Write(ref _pendingCount, _pendingPaths.Count + _pendingGlobal.Count);
     }
 
     private static bool ContainsReconciliation(List<IndexEvent> events)
@@ -264,6 +295,7 @@ public sealed class DebouncingEventQueue : IDisposable
             }
         }
 
+        PublishPendingCount();
         return result;
     }
 }
