@@ -12,6 +12,68 @@ Indexed provides full-text code search via two interfaces:
 
 The daemon starts automatically on first CLI use and shuts down after 30 minutes of inactivity.
 
+## 1.1 Prerequisites
+
+- **Windows**: all projects target `net10.0-windows`.
+- **.NET 10**:
+  - To **run** a published `idx.exe`, install the .NET 10 runtime.
+  - To **build from source**, install the .NET 10 SDK.
+- **Git**: `git.exe` must be on `PATH` for repository discovery and enumeration.
+
+## 1.2 Installing / getting `idx` on PATH
+
+### Option A: Run from source (this repo)
+
+From `src/Indexed/`, you can run the CLI via `dotnet run`:
+
+```bash
+cd src/Indexed
+dotnet run --project src/Indexed.Cli -- status
+dotnet run --project src/Indexed.Cli -- find "SearchRequest" --glob "src/**/*.cs"
+```
+
+### Option B: Use build outputs (this repo)
+
+Build once, then run the built executable directly:
+
+```bash
+cd src/Indexed
+dotnet build -c Release
+.\src\Indexed.Cli\bin\Release\net10.0-windows\idx.exe status
+```
+
+This works as long as `idx.exe` remains inside the repo checkout: the launcher
+can locate `Indexed.Service.exe` by walking the build tree.
+
+### Option C: Publish for use in other repositories
+
+To use Indexed in arbitrary repositories (not just inside this checkout),
+publish **both** the CLI and the daemon into the same directory and add it to
+`PATH`:
+
+```bash
+cd src/Indexed
+$dest = "$env:LOCALAPPDATA\\Indexed\\bin"
+dotnet publish src/Indexed.Cli -c Release -o $dest
+dotnet publish src/Indexed.Service -c Release -o $dest
+```
+
+Now `idx` can be invoked from any git repo, and it will discover and launch the
+side-by-side `Indexed.Service.exe` as needed.
+
+## 1.3 Daemon executable discovery (`Indexed.Service.exe`)
+
+The CLI must be able to locate `Indexed.Service.exe` in order to start the
+daemon. Resolution order is:
+
+1. `INDEXED_SERVICE_EXE` environment variable (explicit override).
+2. `Indexed.Service.exe` next to `idx.exe` (publish / install layout).
+3. A best-effort walk of the build tree (works when running inside this repo).
+
+If you see an error like “Could not locate Indexed.Service.exe”, either
+re-run after `dotnet build`, set `INDEXED_SERVICE_EXE`, or publish both
+executables side-by-side (Option C above).
+
 ## 2. CLI reference (`idx`)
 
 ### 2.1 Syntax
@@ -23,6 +85,16 @@ idx rescan [--repo-root <dir>]
 idx stop [--repo-root <dir>]
 idx --help
 ```
+
+**Daemon launch options (any command):**
+
+These options can be passed to **any** verb. They only take effect when that
+invocation launches a new daemon; if an existing daemon is adopted via
+`daemon.json`, the already-running daemon's settings remain in effect.
+
+- `--exclude-index <glob>` (repeatable)
+- `--no-default-excludes`
+- `--idle-timeout-seconds <n>`
 
 ### 2.2 `idx find`
 
@@ -65,6 +137,7 @@ idx find <pattern> [--mode auto|code|prose]
 | `--max-matches-per-file` | 20 | Maximum matches per file. |
 | `--json` | off | Emit raw JSON `SearchResponse` instead of text output. |
 | `--repo-root` | cwd | Override repository root detection. |
+| `--idle-timeout-seconds` | (daemon default) | Override daemon idle-exit window (seconds). Applies only when this invocation launches a new daemon. |
 
 **Examples:**
 
@@ -122,7 +195,7 @@ idx status --json
 Indexed daemon v0.1.0  pid=12345
   repo:    C:\Tools2\Tools
   repoId:  a1b2c3d4e5f6
-  schema:  1
+  schema:  2
   started: 2026-04-15T10:00:00Z
   head:    abc123def456... (indexed: abc123def456...)
   stale:   no
@@ -159,7 +232,7 @@ Returns daemon health and freshness metadata.
 ```json
 {
   "daemonVersion": "0.1.0",
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "pid": 12345,
   "repoRoot": "C:\\Tools2\\Tools",
   "repoId": "a1b2c3d4e5f6",
@@ -452,10 +525,11 @@ never interleave with batch commits.
 **Symptom**: `idx find` hangs or returns exit code 4.
 
 **Checks**:
-1. Is `git` on PATH? The daemon fails fast if `git` is not available.
-2. Is the current directory inside a git repository? Run `git rev-parse --show-toplevel`.
-3. Is another daemon already running? Check `%LOCALAPPDATA%\Indexed\<repoId>\daemon.json` for a stale PID. Kill the process or delete the file.
-4. Check logs at `%LOCALAPPDATA%\Indexed\<repoId>\logs\`.
+1. Can the CLI locate `Indexed.Service.exe`? If not, publish/install side-by-side or set `INDEXED_SERVICE_EXE` (see §1.3).
+2. Is `git` on PATH? The daemon fails fast if `git` is not available.
+3. Is the current directory inside a git repository? Run `git rev-parse --show-toplevel`.
+4. Is another daemon already running? Check `%LOCALAPPDATA%\Indexed\<repoId>\daemon.json` for a stale PID. Kill the process or delete the file.
+5. Check logs at `%LOCALAPPDATA%\Indexed\<repoId>\logs\`.
 
 ### Stale results
 

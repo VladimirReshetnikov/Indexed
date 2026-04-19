@@ -37,6 +37,10 @@ internal static class DaemonLauncher
     /// <param name="daemonJsonPath">Path to watch for the bound port-file.</param>
     /// <param name="timeout">How long to wait for the daemon to become ready.</param>
     /// <param name="appData">Optional override of <c>%LOCALAPPDATA%\Indexed</c>.</param>
+    /// <param name="idleTimeoutSeconds">
+    /// Optional daemon idle-exit override (in seconds) forwarded via
+    /// <c>--idle-timeout-seconds</c>.
+    /// </param>
     /// <param name="indexExcludeGlobs">Additional index-time exclude globs forwarded on launch.</param>
     /// <param name="noDefaultExcludes">
     /// When <c>true</c>, passes <c>--no-default-excludes</c> so the daemon
@@ -49,6 +53,7 @@ internal static class DaemonLauncher
         string daemonJsonPath,
         TimeSpan timeout,
         string? appData = null,
+        int? idleTimeoutSeconds = null,
         IReadOnlyList<string>? indexExcludeGlobs = null,
         bool noDefaultExcludes = false,
         CancellationToken cancellationToken = default)
@@ -71,6 +76,11 @@ internal static class DaemonLauncher
         {
             psi.ArgumentList.Add("--app-data");
             psi.ArgumentList.Add(appData);
+        }
+        if (idleTimeoutSeconds is not null)
+        {
+            psi.ArgumentList.Add("--idle-timeout-seconds");
+            psi.ArgumentList.Add(idleTimeoutSeconds.Value.ToString());
         }
         if (indexExcludeGlobs is not null)
         {

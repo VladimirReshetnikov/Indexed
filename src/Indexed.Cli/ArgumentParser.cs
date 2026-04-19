@@ -23,8 +23,8 @@ namespace Indexed.Cli;
 ///                    [--glob &lt;g&gt;] [--exclude &lt;g&gt;]* [--kind &lt;k&gt;]*
 ///                    [--context-before N] [--context-after N] [-C N]
 ///                    [--max-matches N] [--max-matches-per-file N]
-///                    [--json] [--repo-root &lt;dir&gt;]
-/// idx status [--repo-root &lt;dir&gt;] [--json]
+///                    [--json] [--repo-root &lt;dir&gt;] [--idle-timeout-seconds N]
+/// idx status [--repo-root &lt;dir&gt;] [--json] [--idle-timeout-seconds N]
 /// idx rescan [--repo-root &lt;dir&gt;]
 /// idx stop [--repo-root &lt;dir&gt;]
 /// idx --help | idx -h
@@ -66,6 +66,7 @@ public static class ArgumentParser
         var maxMatchesPerFile = 20;
         var emitJson = false;
         string? repoRoot = null;
+        int? idleTimeoutSeconds = null;
 
         string? TakeArg(ref int i, string flag)
         {
@@ -134,6 +135,9 @@ public static class ArgumentParser
                     case "--repo-root":
                         repoRoot = TakeArg(ref i, a);
                         break;
+                    case "--idle-timeout-seconds":
+                        idleTimeoutSeconds = ParseInt(TakeArg(ref i, a)!, a);
+                        break;
                     case "-h":
                     case "--help":
                         return new CliArguments { Command = CliCommand.Help };
@@ -174,6 +178,7 @@ public static class ArgumentParser
             MaxMatchesPerFile = maxMatchesPerFile,
             EmitJson = emitJson,
             RepoRoot = repoRoot,
+            IdleTimeoutSeconds = idleTimeoutSeconds,
         };
     }
 
@@ -236,6 +241,7 @@ public static class ArgumentParser
           --max-matches-per-file <n>    per-file cap (default 20)
           --json                        emit raw JSON response
           --repo-root <dir>             override repository root
+          --idle-timeout-seconds <n>    daemon idle timeout override (new daemon only)
         """;
 }
 

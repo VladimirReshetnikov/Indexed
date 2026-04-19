@@ -27,12 +27,14 @@ namespace Indexed.Service;
 /// </para>
 /// <para>
 /// Request handlers are cheap — they delegate to an <see cref="ISearchBackend"/>
-/// for <c>/search</c> and return cached metadata for everything else. Stage 2
-/// adds ownership of the per-repo <see cref="SqliteIndex"/>: the host opens
-/// <c>index.db</c> during <see cref="StartAsync"/>, runs a synchronous full
-/// scan if the DB is empty, and disposes the index on shutdown. No watcher is
-/// wired yet — <c>POST /rescan</c> runs another full scan on the request
-/// thread; Stage 4 moves that to a background worker with incremental diffs.
+/// for <c>/search</c> and return cached metadata for everything else. The host
+/// owns the per-repo <see cref="SqliteIndex"/>: it opens <c>index.db</c>
+/// during <see cref="StartAsync"/>, runs an initial full scan when required
+/// (empty DB or schema mismatch), and wires incremental indexing
+/// (<see cref="RepoWatcher"/>, <see cref="HeadPoller"/>, and background
+/// reconciliation) before entering the request loop. <c>POST /rescan</c>
+/// enqueues a reconciliation request and returns immediately; the actual work
+/// happens asynchronously on the incremental indexer worker.
 /// </para>
 /// <para>
 /// Lifecycle:

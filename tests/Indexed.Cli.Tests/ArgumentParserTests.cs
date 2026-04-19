@@ -64,6 +64,7 @@ public sealed class ArgumentParserTests
         Assert.False(r.IsRegex);
         Assert.False(r.CaseSensitive);
         Assert.False(r.EmitJson);
+        Assert.Null(r.IdleTimeoutSeconds);
         Assert.Equal(200, r.MaxMatches);
         Assert.Equal(20, r.MaxMatchesPerFile);
     }
@@ -242,5 +243,27 @@ public sealed class ArgumentParserTests
         });
         Assert.True(r.NoDefaultExcludes);
         Assert.Equal(new[] { "lib/**" }, r.IndexExcludeGlob);
+    }
+
+    // ----- --idle-timeout-seconds -----
+
+    [Theory]
+    [InlineData("status")]
+    [InlineData("find")]
+    public void IdleTimeoutSeconds_Parsed(string verb)
+    {
+        var r = verb == "find"
+            ? ArgumentParser.Parse(new[] { "find", "foo", "--idle-timeout-seconds", "10" })
+            : ArgumentParser.Parse(new[] { "status", "--idle-timeout-seconds", "10" });
+
+        Assert.Equal(10, r.IdleTimeoutSeconds);
+    }
+
+    [Fact]
+    public void IdleTimeoutSeconds_NonInteger_RendersDiagnostic()
+    {
+        var r = ArgumentParser.Parse(new[] { "status", "--idle-timeout-seconds", "x" });
+        Assert.Equal(CliCommand.Help, r.Command);
+        Assert.Contains("--idle-timeout-seconds", r.Diagnostic);
     }
 }

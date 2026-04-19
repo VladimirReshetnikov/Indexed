@@ -47,6 +47,7 @@ internal static class CliApp
                 repoRoot,
                 appData: null,
                 startupTimeout: null, // 120 s default; cold scan can take tens of seconds
+                idleTimeoutSeconds: args.IdleTimeoutSeconds,
                 indexExcludeGlobs: args.IndexExcludeGlob,
                 noDefaultExcludes: args.NoDefaultExcludes,
                 cancellationToken: cancellationToken).ConfigureAwait(false);

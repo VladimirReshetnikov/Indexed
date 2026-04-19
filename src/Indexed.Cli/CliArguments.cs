@@ -70,6 +70,17 @@ public sealed record CliArguments
     /// </summary>
     public bool NoDefaultExcludes { get; init; }
 
+    /// <summary>
+    /// Optional override forwarded to the daemon at launch to change its
+    /// idle-exit window. Maps to <c>--idle-timeout-seconds</c> on the daemon.
+    /// </summary>
+    /// <remarks>
+    /// Only applies when this CLI invocation launches a new daemon. If an
+    /// existing daemon is adopted via <c>daemon.json</c>, the already-running
+    /// daemon's idle timeout remains in effect.
+    /// </remarks>
+    public int? IdleTimeoutSeconds { get; init; }
+
     /// <summary>Parse error message for <see cref="CliCommand.Help"/>.</summary>
     public string? Diagnostic { get; init; }
 }

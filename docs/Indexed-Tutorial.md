@@ -43,8 +43,8 @@ every subsequent query lands in tens of milliseconds because:
 - The daemon keeps a trigram index of every indexed file in a SQLite database.
 - A file-system watcher picks up edits as they happen, so the index stays
   current while you work.
-- The daemon stays resident for 30 minutes after your last query and shuts
-  itself down quietly if nothing comes in.
+- The daemon stays resident for ~30 minutes after your last request (and after
+  indexing work goes quiet) and shuts itself down quietly if nothing comes in.
 
 **Reach for Indexed when:**
 
@@ -66,7 +66,7 @@ The two tools are complementary. Most contributors keep both on PATH.
 
 ## 2. First run: let the daemon come up
 
-There is **no separate install or init step**. From inside any git
+Once `idx` is on PATH, there is **no separate init step**. From inside any git
 repository, run:
 
 ```bash
@@ -81,8 +81,10 @@ a couple of minutes on a hundred-thousand-file repo). Under the hood:
    commit SHA.
 2. It looks for `%LOCALAPPDATA%\Indexed\<repoId>\daemon.json`. Not finding one,
    it launches the daemon.
-3. The daemon enumerates every git-tracked file, classifies each as code,
-   prose, or binary, and builds the trigram index in `index.db`.
+3. The daemon enumerates every file that is either git-tracked or
+   untracked-but-not-ignored (`git ls-files` plus
+   `git ls-files --others --exclude-standard`), classifies each as code, prose,
+   or binary, and builds the trigram index in `index.db`.
 4. When indexing finishes, `idx status` returns.
 
 Expected output after the first run:
@@ -301,8 +303,9 @@ most cases. Reach for it when:
 
 ### 6.4 Idle timeout
 
-By default the daemon exits after 30 minutes without a request. You can
-override this on first launch:
+By default the daemon exits after 30 minutes without a request (and with no
+pending index work). You can override this on a CLI invocation that launches a
+new daemon:
 
 ```bash
 # Keep the daemon alive for 8 hours of idle
@@ -310,7 +313,9 @@ idx status --idle-timeout-seconds 28800
 ```
 
 The override applies to that daemon instance; the next launch will use the
-default unless you pass the flag again.
+default unless you pass the flag again. If a daemon is already running,
+`idx status` will adopt it and ignore the override — run `idx stop` (or wait
+for the idle timeout) first if you need a new value to take effect.
 
 ## 7. Configuring what gets indexed
 
@@ -415,9 +420,9 @@ for the next query.
 
 ## 9. JSON output for scripts and agents
 
-Every CLI command accepts `--json` and emits a structured response that
-matches the HTTP API shape. The JSON is stable; the human text is for
-humans.
+The commands that return structured data (`idx find` and `idx status`) accept
+`--json` and emit a structured response that matches the HTTP API shape. The
+JSON is stable; the human text is for humans.
 
 ```bash
 idx find "IndexedErrorCode" --json
@@ -471,11 +476,14 @@ Pick the symptom that matches yours.
 The daemon could not be reached or launched.
 
 1. Is `git` on PATH? `git --version` should succeed.
-2. Is the current directory inside a git repo? `git rev-parse --show-toplevel`.
-3. Is a stale `daemon.json` pointing at a dead PID? Check
+2. Can the CLI locate `Indexed.Service.exe`? If you see an error about the
+   daemon executable, publish/install `idx.exe` and `Indexed.Service.exe`
+   side-by-side or set `INDEXED_SERVICE_EXE` (see the usage guide §1.3).
+3. Is the current directory inside a git repo? `git rev-parse --show-toplevel`.
+4. Is a stale `daemon.json` pointing at a dead PID? Check
    `%LOCALAPPDATA%\Indexed\<repoId>\daemon.json`. Delete it (or kill the
    PID it names) and retry.
-4. Look at the daemon log at
+5. Look at the daemon log at
    `%LOCALAPPDATA%\Indexed\<repoId>\logs\`.
 
 ### 11.2 Results look stale no matter what
@@ -508,12 +516,24 @@ is the real fix.
 
 ### 11.5 Disk usage is surprising
 
-The index itself is typically 5–15% of the indexed bytes. Much of what
-you see in `%LOCALAPPDATA%\Indexed\<repoId>\` at any given moment is the
-SQLite **WAL** (`.db-wal`) — it grows during bursts of indexing and
-collapses on graceful shutdown or the next checkpoint. If you are
-concerned, `idx stop` forces a checkpoint and should shrink the on-disk
-footprint noticeably.
+Trigram indexing is fast, but it can be space-hungry. It is normal for
+`index.db` to be a significant fraction of the indexed corpus (and for very
+large repos, potentially comparable to it).
+
+Also note that much of what you see in `%LOCALAPPDATA%\Indexed\<repoId>\` at
+any given moment can be the SQLite **WAL** (`index.db-wal`) — it grows during
+bursts of indexing and collapses on graceful shutdown or the next checkpoint.
+If you are concerned, `idx stop` forces a checkpoint and often shrinks the
+on-disk footprint noticeably.
+
+If disk usage is a real problem:
+
+- Add `--exclude-index` patterns for large low-value trees (`lib/**`, vendored
+  bundles, etc.).
+- Consider disabling the default exclude list only when needed
+  (`--no-default-excludes` makes the index larger).
+- Read `Indexed-Index-Size-Reduction-Strategies.md` and
+  `Indexed-Size-Reduction-SafeNearTerm-Plan.md` for the deeper trade-offs.
 
 ### 11.6 I changed schema version or upgraded Indexed
 

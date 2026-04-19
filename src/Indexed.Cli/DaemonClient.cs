@@ -56,6 +56,10 @@ internal sealed class DaemonClient : IDisposable
     /// <param name="repoRoot">Repository working-tree root.</param>
     /// <param name="appData">Override for <c>%LOCALAPPDATA%\Indexed</c>.</param>
     /// <param name="startupTimeout">How long to wait for the daemon to become ready (default 120 s).</param>
+    /// <param name="idleTimeoutSeconds">
+    /// Optional idle-exit override forwarded to the daemon on launch. Only
+    /// applies when this call launches a new daemon.
+    /// </param>
     /// <param name="indexExcludeGlobs">Additional index-time exclude globs forwarded on launch.</param>
     /// <param name="noDefaultExcludes">
     /// When <c>true</c>, pass <c>--no-default-excludes</c> to the daemon on
@@ -66,6 +70,7 @@ internal sealed class DaemonClient : IDisposable
         string repoRoot,
         string? appData = null,
         TimeSpan? startupTimeout = null,
+        int? idleTimeoutSeconds = null,
         IReadOnlyList<string>? indexExcludeGlobs = null,
         bool noDefaultExcludes = false,
         CancellationToken cancellationToken = default)
@@ -98,6 +103,7 @@ internal sealed class DaemonClient : IDisposable
             paths.DaemonJsonPath,
             startupTimeout ?? TimeSpan.FromSeconds(120),
             appData,
+            idleTimeoutSeconds,
             indexExcludeGlobs,
             noDefaultExcludes,
             cancellationToken).ConfigureAwait(false);
