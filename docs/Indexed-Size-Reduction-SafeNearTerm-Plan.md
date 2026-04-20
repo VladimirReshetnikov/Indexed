@@ -564,15 +564,17 @@ Each new test file must follow the existing xUnit + `Microsoft.Extensions.Loggin
 | Optimizer starves the incremental indexer under write pressure | Low | Per-tick page budget is small; incremental writer holds the lock first. Covered by `CoexistsWithIncrementalIndexer` test. |
 | Schema migration eats user work | Very low | `index.db` is a derived artifact; all content reconstructible from repo. Documented property. |
 
-## Effort estimate
+## New-surface sizing
 
-| PR | Implementation | Tests | Total |
+Indicative LOC deltas (production + tests) per PR:
+
+| PR | Implementation LOC | Tests LOC | Notes |
 |---|---|---|---|
-| 1 — default excludes | 0.5 day | 0.5 day | 1 day |
-| 2 — optimizer | 1 day | 1 day | 2 days |
-| 3 — contentless + rehydrate | 2 days | 1.5 days | 3.5 days |
-| Baseline + post-measurement | — | — | 1 day |
-| **Total** | | | **~7.5 days of focused work** |
+| 1 — default excludes | ~40–80 | ~40–80 | one new exclusion-list config path + fixtures |
+| 2 — optimizer | ~100–200 | ~100–200 | new optimizer pass + its fixtures |
+| 3 — contentless + rehydrate | ~200–400 | ~150–300 | contentless mode + rehydrate pipeline + fixtures |
+| Baseline + post-measurement | ~50 | ~50 | ad-hoc benchmarks |
+| **Total** | **~400–730 LOC implementation + ~340–630 LOC tests** | | Small-to-moderate new surface across three PRs. |
 
 ## Open questions (resolve before starting)
 

@@ -358,7 +358,7 @@ Each row is a single coherent design; combinations are discussed in §5.
 | 3.3.3 | Bloom shard + scan | ~0.3× | +file scan on hit | rebuild per-file filter | M | yes |
 | 3.3.4 | Contentless + CAS | additive | +decompress on snippet | GC overhead | L | no |
 
-Legend: XS < 1 day, S ~1 week, M ~1 month, L ~3 months, XL ~6+ months.
+Legend: relative-size buckets — XS (~<100 LOC delta, one focused change), S (~100–500 LOC, one subsystem), M (~500–2k LOC, multiple subsystems + new tests), L (~2–5k LOC, new module + fixtures), XL (~5k+ LOC, multiple new modules + migration surface). Velocity-independent relative markers, not calendar figures.
 
 ## 5. Plausible compositions
 

@@ -9,7 +9,7 @@
 ## How to use this document
 
 - Stages are **sequential**. Each stage declares its preconditions; do not start a stage until they are satisfied.
-- Within a stage, tasks are listed in **execution order**. Sizing tags (`S` / `M` / `L`) are rough budgets: `S` = a few hours to a day, `M` = 1–3 days, `L` = 3+ days.
+- Within a stage, tasks are listed in **execution order**. Sizing tags (`S` / `M` / `L`) are rough relative-effort buckets: `S` = small (indicatively < ~100 LOC net delta, single file or a focused change), `M` = medium (~100–500 LOC, a few files, a couple of new tests), `L` = large (> ~500 LOC, multiple subsystems, a notable new fixture set). These are velocity-independent relative markers, not calendar figures.
 - **Every stage ends with a runnable daemon + CLI.** No stage is allowed to leave the tree in a half-built state.
 - Every task should land with its tests. Stages do not close until the test coverage listed under "Test coverage" is passing on CI.
 - When a task references the proposal (e.g., "§4.2 schema"), it means the corresponding section of `Indexed-Architecture-Proposal.md`. That document is the authority for shape and contracts; this plan is the authority for order and scope.
