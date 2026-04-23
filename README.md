@@ -3,7 +3,7 @@
 Background-indexed full-text search service for a local workspace target, aimed primarily at AI coding agents that need millisecond-class code search across a git repository, a standalone directory tree, or an explicit multi-directory workspace.
 
 - Created (UTC): 2026-04-15T17:00:00Z
-- Repository HEAD: cd463ca87356b067e49fe274a1ebcb6e92376c1d
+- Repository HEAD: e5c1e2b48eea1534033dbf6bcd549b2059db91e7
 
 ## Project goals
 
@@ -148,6 +148,7 @@ you cannot publish side-by-side, set `INDEXED_SERVICE_EXE` to the full path of
 - [Usage guide](docs/Indexed-Usage-Guide.md) — CLI reference, HTTP API, configuration, data directory layout, troubleshooting.
 - [Architecture](docs/Indexed-Architecture.md) — current-state architecture, layer ownership, data flow, concurrency model, failure handling.
 - [Workspace targets proposal](docs/Indexed-Workspace-Targets-Proposal.md) — design record for the target model that now backs git, directory-tree, and directory-set indexing.
+- [Proposed improvements](docs/Indexed-Proposed-Improvements__b8e57a4a6c7f.md) — prioritized next-step recommendations after workspace-target support landed.
 - [Index size reduction strategies](docs/Indexed-Index-Size-Reduction-Strategies.md) — why trigram FTS5 is large and what can be done about it.
 - [Size reduction near-term plan](docs/Indexed-Size-Reduction-SafeNearTerm-Plan.md) — concrete “what to do next” plan for shrinking `index.db` safely.
 - [Architecture proposal](docs/Indexed-Architecture-Proposal.md) — original design document (historical).
