@@ -66,6 +66,7 @@ src/Indexed/
     README.md
     docs/
         Indexed-Architecture.md
+        Indexed-Workspace-Targets-Proposal.md
         Indexed-Tutorial.md
         Indexed-Usage-Guide.md
         Indexed-Architecture-Proposal.md
@@ -133,6 +134,7 @@ you cannot publish side-by-side, set `INDEXED_SERVICE_EXE` to the full path of
 - [Tutorial](docs/Indexed-Tutorial.md) — learning-oriented walkthrough for humans; read this first.
 - [Usage guide](docs/Indexed-Usage-Guide.md) — CLI reference, HTTP API, configuration, data directory layout, troubleshooting.
 - [Architecture](docs/Indexed-Architecture.md) — current-state architecture, layer ownership, data flow, concurrency model, failure handling.
+- [Workspace targets proposal](docs/Indexed-Workspace-Targets-Proposal.md) — draft design for adding non-git single-directory and multi-directory indexing while preserving the current git-repo mode.
 - [Index size reduction strategies](docs/Indexed-Index-Size-Reduction-Strategies.md) — why trigram FTS5 is large and what can be done about it.
 - [Size reduction near-term plan](docs/Indexed-Size-Reduction-SafeNearTerm-Plan.md) — concrete “what to do next” plan for shrinking `index.db` safely.
 - [Architecture proposal](docs/Indexed-Architecture-Proposal.md) — original design document (historical).
