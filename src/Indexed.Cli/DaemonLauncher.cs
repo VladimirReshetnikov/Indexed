@@ -1,9 +1,11 @@
 using System;
+using System.Collections.ObjectModel;
 using System.Diagnostics;
 using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
 using Indexed.Service;
+using Indexed.Targets;
 
 namespace Indexed.Cli;
 
@@ -30,10 +32,10 @@ namespace Indexed.Cli;
 internal static class DaemonLauncher
 {
     /// <summary>
-    /// Start a detached daemon process for <paramref name="repoRoot"/> and
+    /// Start a detached daemon process for <paramref name="targetSpec"/> and
     /// return once either the port-file is observable or the timeout expires.
     /// </summary>
-    /// <param name="repoRoot">Working-tree root to index.</param>
+    /// <param name="targetSpec">Canonical target specification to serve.</param>
     /// <param name="daemonJsonPath">Path to watch for the bound port-file.</param>
     /// <param name="timeout">How long to wait for the daemon to become ready.</param>
     /// <param name="appData">Optional override of <c>%LOCALAPPDATA%\Indexed</c>.</param>
@@ -41,23 +43,18 @@ internal static class DaemonLauncher
     /// Optional daemon idle-exit override (in seconds) forwarded via
     /// <c>--idle-timeout-seconds</c>.
     /// </param>
-    /// <param name="indexExcludeGlobs">Additional index-time exclude globs forwarded on launch.</param>
-    /// <param name="noDefaultExcludes">
-    /// When <c>true</c>, passes <c>--no-default-excludes</c> so the daemon
-    /// does not apply the built-in default exclude list.
-    /// </param>
     /// <param name="cancellationToken">Cancellation token.</param>
     /// <returns>The observed <see cref="DaemonInfo"/>, or <c>null</c> on timeout.</returns>
     public static async Task<DaemonInfo?> LaunchAsync(
-        string repoRoot,
+        TargetSpec targetSpec,
         string daemonJsonPath,
         TimeSpan timeout,
         string? appData = null,
         int? idleTimeoutSeconds = null,
-        IReadOnlyList<string>? indexExcludeGlobs = null,
-        bool noDefaultExcludes = false,
         CancellationToken cancellationToken = default)
     {
+        if (targetSpec is null) throw new ArgumentNullException(nameof(targetSpec));
+
         var exe = ResolveServiceExecutable()
             ?? throw new FileNotFoundException(
                 "Could not locate Indexed.Service.exe. Set INDEXED_SERVICE_EXE or run `dotnet build`.");
@@ -69,9 +66,9 @@ internal static class DaemonLauncher
             RedirectStandardInput = false,
             RedirectStandardOutput = false,
             RedirectStandardError = false,
-            WorkingDirectory = repoRoot,
+            WorkingDirectory = Directory.GetCurrentDirectory(),
         };
-        psi.ArgumentList.Add(repoRoot);
+        AddTargetArguments(psi.ArgumentList, targetSpec);
         if (!string.IsNullOrEmpty(appData))
         {
             psi.ArgumentList.Add("--app-data");
@@ -82,17 +79,22 @@ internal static class DaemonLauncher
             psi.ArgumentList.Add("--idle-timeout-seconds");
             psi.ArgumentList.Add(idleTimeoutSeconds.Value.ToString());
         }
-        if (indexExcludeGlobs is not null)
+        if (targetSpec.IndexExcludeGlobs is not null)
         {
-            foreach (var glob in indexExcludeGlobs)
+            foreach (var glob in targetSpec.IndexExcludeGlobs)
             {
                 psi.ArgumentList.Add("--exclude-index");
                 psi.ArgumentList.Add(glob);
             }
         }
-        if (noDefaultExcludes)
+        if (!targetSpec.UseDefaultIndexExcludes)
         {
             psi.ArgumentList.Add("--no-default-excludes");
+        }
+        if (targetSpec.Kind is TargetKind.DirectoryTree or TargetKind.DirectorySet
+            && !targetSpec.UseDefaultDirectoryExcludes)
+        {
+            psi.ArgumentList.Add("--no-default-directory-excludes");
         }
 
         using var _ = Process.Start(psi)
@@ -166,5 +168,32 @@ internal static class DaemonLauncher
     {
         var parts = baseDir.Split(Path.DirectorySeparatorChar, StringSplitOptions.RemoveEmptyEntries);
         return parts.Length == 0 ? "net10.0-windows" : parts[^1];
+    }
+
+    private static void AddTargetArguments(Collection<string> argumentList, TargetSpec spec)
+    {
+        switch (spec.Kind)
+        {
+            case TargetKind.GitRepository:
+                argumentList.Add("--repo-root");
+                argumentList.Add(spec.Roots[0].Path);
+                break;
+
+            case TargetKind.DirectoryTree:
+                argumentList.Add("--root");
+                argumentList.Add(TargetRootArgumentParser.Format(spec.Roots[0], requireLabel: false));
+                break;
+
+            case TargetKind.DirectorySet:
+                foreach (var root in spec.Roots)
+                {
+                    argumentList.Add("--root");
+                    argumentList.Add(TargetRootArgumentParser.Format(root, requireLabel: true));
+                }
+                break;
+
+            default:
+                throw new InvalidOperationException($"unsupported target kind '{spec.Kind}'");
+        }
     }
 }

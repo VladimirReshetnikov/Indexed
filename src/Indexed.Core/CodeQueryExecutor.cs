@@ -15,7 +15,7 @@ namespace Indexed.Core;
 /// <remarks>
 /// <para>
 /// Flow: ask the index for candidate file IDs (FTS5 MATCH or full scan), pull
-/// the corresponding <c>(path, sha256)</c> rows in bounded batches, read the
+/// the corresponding <c>(logical_path, sha256)</c> rows in bounded batches, read the
 /// live on-disk content via <see cref="FileContentProvider"/>, and scan each
 /// content string for real matches using the pre-compiled regex or a plain
 /// <see cref="string.IndexOf(string, int, StringComparison)"/>. Line and
@@ -47,7 +47,7 @@ namespace Indexed.Core;
 ///   <item><description>The caller's <paramref name="cancellationToken"/> is honored between files and during SQLite round trips.</description></item>
 /// </list>
 /// <para>
-/// Path globs are filtered application-side against the <c>files.path</c>
+/// Path globs are filtered application-side against the stored logical-path
 /// column after the candidate query — the candidate set is already small for
 /// literal queries, and glob filtering on SQLite <c>LIKE</c> is strictly
 /// worse for arbitrary globs (<c>**</c>, <c>?</c>) than running a compiled
@@ -126,10 +126,10 @@ public sealed class CodeQueryExecutor
             foreach (var row in rows)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                if (!PathAllowed(row.Path, includeRegex, excludeFilter)) continue;
+                if (!PathAllowed(row.LogicalPath, includeRegex, excludeFilter)) continue;
 
                 var outcome = await _contentProvider
-                    .ReadAsync(row.Path, cancellationToken)
+                    .ReadAsync(row.LogicalPath, cancellationToken)
                     .ConfigureAwait(false);
                 if (!outcome.IsOk)
                 {
@@ -146,16 +146,16 @@ public sealed class CodeQueryExecutor
                     {
                         IndexEvent repair = outcome.Status switch
                         {
-                            FileReadStatus.Missing => new FileDeleted(row.Path),
-                            FileReadStatus.OutOfRoot => new FileDeleted(row.Path),
-                            _ => new FileChanged(row.Path),
+                            FileReadStatus.Missing => new FileDeleted(row.LogicalPath),
+                            FileReadStatus.OutOfRoot => new FileDeleted(row.LogicalPath),
+                            _ => new FileChanged(row.LogicalPath),
                         };
                         _repairQueue.Enqueue(repair);
                     }
                     continue;
                 }
 
-                var hits = ScanFile(request, plan, row.Path, outcome.Content!, out var fileTruncated);
+                var hits = ScanFile(request, plan, row.LogicalPath, outcome.Content!, out var fileTruncated);
                 total += hits.ReportedTotal;
                 if (fileTruncated) truncated = true;
 

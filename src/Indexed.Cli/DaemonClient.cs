@@ -15,11 +15,11 @@ namespace Indexed.Cli;
 /// </summary>
 /// <remarks>
 /// <para>
-/// Construction flow: the CLI resolves the repo root, computes <c>repoId</c>,
-/// locates <c>daemon.json</c>, and hands it to <see cref="CreateAsync"/>.
-/// If the port-file is absent or pointing at a defunct daemon, the client
-/// asks <see cref="DaemonLauncher"/> to spawn a new process and blocks until
-/// <c>/status</c> answers.
+/// Construction flow: the CLI resolves a target selection, computes the
+/// corresponding target identity, locates <c>daemon.json</c>, and hands it to
+/// <see cref="CreateAsync"/>. If the port-file is absent or pointing at a
+/// defunct daemon, the client asks <see cref="DaemonLauncher"/> to spawn a new
+/// process and blocks until <c>/status</c> answers.
 /// </para>
 /// <para>
 /// Every method returns either a typed response or an <see cref="ErrorResponse"/>
@@ -53,31 +53,25 @@ internal sealed class DaemonClient : IDisposable
     /// Connect to an existing daemon or spawn one via
     /// <see cref="DaemonLauncher"/>.
     /// </summary>
-    /// <param name="repoRoot">Repository working-tree root.</param>
+    /// <param name="targetSelection">Target selection the daemon should serve.</param>
     /// <param name="appData">Override for <c>%LOCALAPPDATA%\Indexed</c>.</param>
     /// <param name="startupTimeout">How long to wait for the daemon to become ready (default 120 s).</param>
     /// <param name="idleTimeoutSeconds">
     /// Optional idle-exit override forwarded to the daemon on launch. Only
     /// applies when this call launches a new daemon.
     /// </param>
-    /// <param name="indexExcludeGlobs">Additional index-time exclude globs forwarded on launch.</param>
-    /// <param name="noDefaultExcludes">
-    /// When <c>true</c>, pass <c>--no-default-excludes</c> to the daemon on
-    /// launch so the built-in exclude list is not applied.
-    /// </param>
     /// <param name="cancellationToken">Cancellation token.</param>
     public static async Task<DaemonClient> CreateAsync(
-        string repoRoot,
+        TargetSelection targetSelection,
         string? appData = null,
         TimeSpan? startupTimeout = null,
         int? idleTimeoutSeconds = null,
-        IReadOnlyList<string>? indexExcludeGlobs = null,
-        bool noDefaultExcludes = false,
         CancellationToken cancellationToken = default)
     {
-        var repo = Indexed.Git.GitRepository.Open(repoRoot);
-        var repoId = RepoId.Compute(repo.RepoRoot, repo.GetFirstCommitSha());
-        var paths = DaemonPaths.ForRepo(repoId, appData);
+        if (targetSelection is null) throw new ArgumentNullException(nameof(targetSelection));
+
+        var target = targetSelection.OpenTarget(cancellationToken);
+        var paths = DaemonPaths.ForTarget(target.TargetId, appData);
         paths.EnsureCreated();
 
         var info = DaemonInfo.TryRead(paths.DaemonJsonPath);
@@ -99,13 +93,11 @@ internal sealed class DaemonClient : IDisposable
         // ≤60 s for this repo). Give the daemon generous headroom here; the
         // caller can still override via startupTimeout for tests.
         var launched = await DaemonLauncher.LaunchAsync(
-            repo.RepoRoot,
+            target.Spec,
             paths.DaemonJsonPath,
             startupTimeout ?? TimeSpan.FromSeconds(120),
             appData,
             idleTimeoutSeconds,
-            indexExcludeGlobs,
-            noDefaultExcludes,
             cancellationToken).ConfigureAwait(false);
 
         if (launched is null)

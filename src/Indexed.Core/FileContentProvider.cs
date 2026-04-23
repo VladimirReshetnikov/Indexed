@@ -2,6 +2,7 @@ using System;
 using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
+using Indexed.Targets;
 
 namespace Indexed.Core;
 
@@ -94,7 +95,7 @@ public readonly record struct FileReadOutcome(FileReadStatus Status, string? Con
 /// Reads file content from the working tree at query time. Paired with the
 /// contentless FTS5 index (schema version 2+): the index stores posting
 /// lists but no content, so snippet rendering pulls the live on-disk text
-/// from here and scans it against the query pattern.
+/// from the current target roots and scans it against the query pattern.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -105,14 +106,11 @@ public readonly record struct FileReadOutcome(FileReadStatus Status, string? Con
 /// <c>Indexed-Size-Reduction-SafeNearTerm-Plan.md §Risk register</c>).
 /// </para>
 /// <para>
-/// Security — path-traversal defense. Rows in <c>files.path</c> are populated
-/// by <see cref="Indexed.Git.GitRepository.EnumerateFiles"/> and are
-/// expected to be repo-relative POSIX paths without <c>..</c> segments.
-/// As defense in depth, <see cref="ReadAsync"/> canonicalizes the resolved
-/// full path and confirms it is still rooted under the repo before
-/// touching the filesystem. A pathological row (absolute path, <c>..</c>
-/// escape, etc.) yields <see cref="FileReadStatus.OutOfRoot"/> and the
-/// caller treats it as if the file is unreadable.
+/// Security — path-traversal defense. Rows in <c>files.logical_path</c> are
+/// expected to be valid target logical paths. <see cref="ReadAsync"/>
+/// resolves them through <see cref="IIndexTarget"/> (or a single-root
+/// compatibility resolver), and any escape outside the owning root yields
+/// <see cref="FileReadStatus.OutOfRoot"/>.
 /// </para>
 /// <para>
 /// Failure policy. Missing files yield <see cref="FileReadStatus.Missing"/>;
@@ -126,34 +124,43 @@ public readonly record struct FileReadOutcome(FileReadStatus Status, string? Con
 /// </remarks>
 public sealed class FileContentProvider
 {
-    private readonly string _repoRoot;
-    private readonly string _repoRootWithSep;
+    private readonly IIndexTarget? _target;
+    private readonly string _primaryRootPath;
+    private readonly string? _singleRootWithSep;
 
     /// <summary>
-    /// Create a provider rooted at <paramref name="repoRoot"/>. All relative
-    /// paths passed to <see cref="ReadAsync"/> are resolved against this root.
+    /// Create a provider backed by an index target. Logical paths are resolved
+    /// through the target's root mapping.
     /// </summary>
-    public FileContentProvider(string repoRoot)
+    public FileContentProvider(IIndexTarget target)
     {
-        if (string.IsNullOrEmpty(repoRoot))
-            throw new ArgumentException("repoRoot is required", nameof(repoRoot));
+        _target = target ?? throw new ArgumentNullException(nameof(target));
+        if (target.Roots.Count == 0)
+            throw new ArgumentException("target must expose at least one root", nameof(target));
 
-        // Canonicalize the root once so the prefix check in ReadAsync is a
-        // pure string compare against a stable reference. GetFullPath also
-        // collapses any trailing separators, which makes the
-        // trailing-separator append below deterministic.
-        _repoRoot = Path.GetFullPath(repoRoot);
-        _repoRootWithSep = _repoRoot.EndsWith(Path.DirectorySeparatorChar)
-            ? _repoRoot
-            : _repoRoot + Path.DirectorySeparatorChar;
+        _primaryRootPath = target.Roots[0].AbsolutePath;
     }
 
-    /// <summary>Repository root this provider resolves relative paths against.</summary>
-    public string RepoRoot => _repoRoot;
+    /// <summary>
+    /// Compatibility constructor for tests and single-root callers. Phase 2
+    /// production code should prefer the <see cref="IIndexTarget"/> overload.
+    /// </summary>
+    public FileContentProvider(string rootPath)
+    {
+        if (string.IsNullOrEmpty(rootPath))
+            throw new ArgumentException("rootPath is required", nameof(rootPath));
+
+        _primaryRootPath = Path.GetFullPath(rootPath);
+        _singleRootWithSep = _primaryRootPath.EndsWith(Path.DirectorySeparatorChar)
+            ? _primaryRootPath
+            : _primaryRootPath + Path.DirectorySeparatorChar;
+    }
+
+    /// <summary>Primary root used for display and single-root compatibility tests.</summary>
+    public string PrimaryRootPath => _primaryRootPath;
 
     /// <summary>
-    /// Read the file at <paramref name="relPath"/> (repo-relative,
-    /// forward-slash separators accepted). Returns a
+    /// Read the file at <paramref name="logicalPath"/>. Returns a
     /// <see cref="FileReadOutcome"/> whose <see cref="FileReadOutcome.Status"/>
     /// distinguishes success from the several failure classes. Never throws
     /// for path or I/O reasons — the outcome carries the classification.
@@ -175,28 +182,25 @@ public sealed class FileContentProvider
     /// }
     /// </code>
     /// </example>
-    public async ValueTask<FileReadOutcome> ReadAsync(string relPath, CancellationToken cancellationToken)
+    public ValueTask<FileReadOutcome> ReadAsync(string logicalPath, CancellationToken cancellationToken)
+        => ReadAsync(new LogicalPath(logicalPath), cancellationToken);
+
+    public async ValueTask<FileReadOutcome> ReadAsync(LogicalPath logicalPath, CancellationToken cancellationToken)
     {
-        if (string.IsNullOrEmpty(relPath)) return FileReadOutcome.Unreadable;
+        if (string.IsNullOrEmpty(logicalPath.Value)) return FileReadOutcome.Unreadable;
 
         string full;
         try
         {
-            var combined = Path.Combine(_repoRoot, relPath.Replace('/', Path.DirectorySeparatorChar));
-            full = Path.GetFullPath(combined);
+            full = _target is not null
+                ? _target.ResolveAbsolutePath(logicalPath)
+                : ResolveSingleRootPath(logicalPath.Value);
         }
+        catch (InvalidOperationException) { return FileReadOutcome.OutOfRoot; }
         catch (ArgumentException) { return FileReadOutcome.Unreadable; }
         catch (PathTooLongException) { return FileReadOutcome.Unreadable; }
         catch (NotSupportedException) { return FileReadOutcome.Unreadable; }
         catch (System.Security.SecurityException) { return FileReadOutcome.Unreadable; }
-
-        // Root-escape check: the canonicalized full path must live under the
-        // repo root. On Windows, comparison is case-insensitive to match NTFS.
-        var rootComparison = OperatingSystem.IsWindows()
-            ? StringComparison.OrdinalIgnoreCase
-            : StringComparison.Ordinal;
-        if (!full.StartsWith(_repoRootWithSep, rootComparison))
-            return FileReadOutcome.OutOfRoot;
 
         try
         {
@@ -220,5 +224,22 @@ public sealed class FileContentProvider
         catch (NotSupportedException) { return FileReadOutcome.Unreadable; }
         catch (ArgumentException) { return FileReadOutcome.Unreadable; }
         catch (IOException) { return FileReadOutcome.Unreadable; }
+    }
+
+    private string ResolveSingleRootPath(string logicalPath)
+    {
+        if (_singleRootWithSep is null)
+            throw new InvalidOperationException("single-root resolver is not available");
+
+        var combined = Path.Combine(_primaryRootPath, logicalPath.Replace('/', Path.DirectorySeparatorChar));
+        var fullPath = Path.GetFullPath(combined);
+        var comparison = OperatingSystem.IsWindows()
+            ? StringComparison.OrdinalIgnoreCase
+            : StringComparison.Ordinal;
+
+        if (!fullPath.StartsWith(_singleRootWithSep, comparison))
+            throw new InvalidOperationException("logical path resolves outside the configured root");
+
+        return fullPath;
     }
 }

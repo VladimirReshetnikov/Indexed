@@ -6,9 +6,9 @@ namespace Indexed.Core;
 
 /// <summary>
 /// Shared helper that compiles gitignore-style glob patterns into compiled
-/// <see cref="Regex"/> instances and tests repository-relative paths against
+/// <see cref="Regex"/> instances and tests logical paths against
 /// the set. Eliminates duplication across <see cref="FullScanIndexer"/>,
-/// <see cref="IncrementalIndexer"/>, <see cref="RepoWatcher"/>, and
+/// <see cref="IncrementalIndexer"/>, <see cref="DirectoryWatcher"/>, and
 /// <see cref="CodeQueryExecutor"/>.
 /// </summary>
 /// <remarks>
@@ -69,6 +69,55 @@ public sealed class ExcludeFilter
         "**/*.g.cs",
         "**/*.g.i.cs",
         "**/*.Designer.cs",
+    };
+
+    /// <summary>
+    /// Conservative directory-mode defaults for subtrees that are usually
+    /// machine-generated, dependency-cached, or VCS-internal rather than
+    /// user-authored source.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// These are intentionally separate from
+    /// <see cref="DefaultBinaryAdjacentGlobs"/> because directory targets need
+    /// subtree-level suppression that git mode normally does not: VCS
+    /// metadata, package caches, Python virtual environments, and common
+    /// build-output folders.
+    /// </para>
+    /// </remarks>
+    public static IReadOnlyList<string> DefaultDirectoryModeExcludes { get; } = new string[]
+    {
+        // Version-control internals
+        "**/.git/**",
+        "**/.hg/**",
+        "**/.svn/**",
+        "**/.jj/**",
+        "**/.bzr/**",
+
+        // Large dependency and package caches
+        "**/node_modules/**",
+        "**/.pnpm-store/**",
+        "**/.yarn/cache/**",
+        "**/.yarn/unplugged/**",
+        "**/.nuget/packages/**",
+        "**/.gradle/**",
+        "**/.m2/repository/**",
+        "**/.cargo/registry/**",
+        "**/.cargo/git/**",
+
+        // Virtual environments and Python caches
+        "**/.venv/**",
+        "**/venv/**",
+        "**/env/**",
+        "**/__pycache__/**",
+        "**/.pytest_cache/**",
+        "**/.mypy_cache/**",
+        "**/.ruff_cache/**",
+
+        // Common build outputs / IDE working dirs
+        "**/bin/**",
+        "**/obj/**",
+        "**/.vs/**",
     };
 
     /// <summary>

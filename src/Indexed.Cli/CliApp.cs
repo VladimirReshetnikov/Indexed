@@ -3,6 +3,7 @@ using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
 using Indexed.Abstractions;
+using Indexed.Service;
 
 namespace Indexed.Cli;
 
@@ -39,17 +40,17 @@ internal static class CliApp
             return string.IsNullOrEmpty(args.Diagnostic) ? 0 : 2;
         }
 
-        var repoRoot = args.RepoRoot ?? Directory.GetCurrentDirectory();
+        if (args.Command == CliCommand.Daemons)
+            return await RunDaemonsAsync(args, stdout, stderr, cancellationToken).ConfigureAwait(false);
 
         try
         {
+            var targetSelection = CreateTargetSelection(args);
             using var client = await DaemonClient.CreateAsync(
-                repoRoot,
+                targetSelection,
                 appData: null,
                 startupTimeout: null, // 120 s default; cold scan can take tens of seconds
                 idleTimeoutSeconds: args.IdleTimeoutSeconds,
-                indexExcludeGlobs: args.IndexExcludeGlob,
-                noDefaultExcludes: args.NoDefaultExcludes,
                 cancellationToken: cancellationToken).ConfigureAwait(false);
 
             return args.Command switch
@@ -66,6 +67,28 @@ internal static class CliApp
             stderr.WriteLine($"idx: {ex.Message}");
             return 4;
         }
+    }
+
+    private static TargetSelection CreateTargetSelection(CliArguments args)
+    {
+        if (args.Roots is { Count: > 0 })
+        {
+            return new TargetSelection
+            {
+                Roots = args.Roots,
+                IndexExcludeGlobs = args.IndexExcludeGlob,
+                UseDefaultIndexExcludes = !args.NoDefaultExcludes,
+                UseDefaultDirectoryExcludes = !args.NoDefaultDirectoryExcludes,
+            };
+        }
+
+        return new TargetSelection
+        {
+            RepoRoot = args.RepoRoot ?? Directory.GetCurrentDirectory(),
+            IndexExcludeGlobs = args.IndexExcludeGlob,
+            UseDefaultIndexExcludes = !args.NoDefaultExcludes,
+            UseDefaultDirectoryExcludes = false,
+        };
     }
 
     private static async Task<int> RunFindAsync(
@@ -141,5 +164,24 @@ internal static class CliApp
         }
         stderr.WriteLine("idx: shutdown request failed");
         return 3;
+    }
+
+    private static Task<int> RunDaemonsAsync(
+        CliArguments args, TextWriter stdout, TextWriter stderr, CancellationToken ct)
+    {
+        try
+        {
+            var daemons = DaemonCatalog.List(appDataBase: null);
+            if (args.EmitJson)
+                OutputFormatter.WriteDaemonsJson(stdout, daemons);
+            else
+                OutputFormatter.WriteDaemonsText(stdout, daemons);
+            return Task.FromResult(0);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            stderr.WriteLine($"idx: {ex.Message}");
+            return Task.FromResult(4);
+        }
     }
 }

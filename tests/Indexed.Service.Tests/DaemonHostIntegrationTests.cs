@@ -10,6 +10,7 @@ using Indexed.Abstractions;
 using Indexed.Core;
 using Indexed.Git;
 using Indexed.Service;
+using Indexed.Targets;
 using Xunit;
 
 namespace Indexed.Service.Tests;
@@ -363,6 +364,30 @@ public sealed class DaemonHostIntegrationTests : IDisposable
         return path;
     }
 
+    private string NewDirectoryRootWithContent((string path, string content)[] files)
+    {
+        var path = Path.Combine(_tempRoot, "dir-" + Guid.NewGuid().ToString("N")[..8]);
+        Directory.CreateDirectory(path);
+        foreach (var (relPath, content) in files)
+        {
+            var full = Path.Combine(path, relPath.Replace('/', Path.DirectorySeparatorChar));
+            Directory.CreateDirectory(Path.GetDirectoryName(full)!);
+            File.WriteAllText(full, content);
+        }
+
+        return path;
+    }
+
+    private static async Task WaitForAsync(Func<Task<bool>> condition, int timeoutMs = 8000)
+    {
+        using var cts = new CancellationTokenSource(timeoutMs);
+        while (!await condition().ConfigureAwait(false))
+        {
+            cts.Token.ThrowIfCancellationRequested();
+            await Task.Delay(100, cts.Token).ConfigureAwait(false);
+        }
+    }
+
     [Fact]
     public async Task DisposeDeletesDaemonJson()
     {
@@ -376,5 +401,118 @@ public sealed class DaemonHostIntegrationTests : IDisposable
         await host.DisposeAsync();
 
         Assert.False(File.Exists(daemonJson));
+    }
+
+    [Fact]
+    public async Task DefaultBackend_DirectoryTree_AnswersCodeSearchWithoutGit()
+    {
+        var root = NewDirectoryRootWithContent(new[]
+        {
+            ("hello.cs", "class Hello { string marker = \"dir-needle\"; }"),
+            ("notes.txt", "plain text"),
+        });
+        var appData = Path.Combine(_tempRoot, "appdata-dir");
+        Directory.CreateDirectory(appData);
+
+        var host = new DaemonHost(new DaemonOptions
+        {
+            TargetSelection = new TargetSelection
+            {
+                Roots = new[] { new TargetRootSpec(null, root) },
+                UseDefaultIndexExcludes = false,
+                UseDefaultDirectoryExcludes = false,
+            },
+            AppDataBase = appData,
+            UseSingletonMutex = false,
+            IdleTimeout = TimeSpan.FromMinutes(5),
+        });
+
+        try
+        {
+            await host.StartAsync();
+            _ = host.RunAsync();
+
+            using var http = new HttpClient
+            {
+                BaseAddress = new Uri($"http://127.0.0.1:{host.Info.Port}/"),
+                Timeout = TimeSpan.FromSeconds(10),
+            };
+
+            using var resp = await http.PostAsJsonAsync(
+                "search",
+                new SearchRequest("dir-needle", Mode: QueryMode.Code),
+                IndexedJsonContext.Default.SearchRequest);
+            resp.EnsureSuccessStatusCode();
+
+            await using var stream = await resp.Content.ReadAsStreamAsync();
+            var body = JsonSerializer.Deserialize(stream, IndexedJsonContext.Default.SearchResponse);
+            Assert.NotNull(body);
+            var match = Assert.Single(body!.Matches);
+            Assert.Equal("hello.cs", match.Path);
+
+            var status = await http.GetFromJsonAsync("status", IndexedJsonContext.Default.StatusResponse);
+            Assert.NotNull(status);
+            Assert.Equal(TargetKind.DirectoryTree, status!.TargetKind);
+            Assert.Null(status.RepoId);
+            Assert.Null(status.RepoRoot);
+            Assert.Equal(RevisionKind.None, status.Freshness.RevisionKind);
+            Assert.False(status.Freshness.IsStale);
+        }
+        finally
+        {
+            await host.DisposeAsync();
+        }
+    }
+
+    [Fact]
+    public async Task DirectoryTree_BackgroundFileChange_BecomesSearchable()
+    {
+        var root = NewDirectoryRootWithContent(Array.Empty<(string path, string content)>());
+        var appData = Path.Combine(_tempRoot, "appdata-dir-live");
+        Directory.CreateDirectory(appData);
+
+        var host = new DaemonHost(new DaemonOptions
+        {
+            TargetSelection = new TargetSelection
+            {
+                Roots = new[] { new TargetRootSpec(null, root) },
+                UseDefaultIndexExcludes = false,
+                UseDefaultDirectoryExcludes = false,
+            },
+            AppDataBase = appData,
+            UseSingletonMutex = false,
+            IdleTimeout = TimeSpan.FromMinutes(5),
+        });
+
+        try
+        {
+            await host.StartAsync();
+            _ = host.RunAsync();
+
+            using var http = new HttpClient
+            {
+                BaseAddress = new Uri($"http://127.0.0.1:{host.Info.Port}/"),
+                Timeout = TimeSpan.FromSeconds(10),
+            };
+
+            var laterFile = Path.Combine(root, "later.cs");
+            File.WriteAllText(laterFile, "class Later { string token = \"live-directory-token\"; }");
+
+            await WaitForAsync(async () =>
+            {
+                using var resp = await http.PostAsJsonAsync(
+                    "search",
+                    new SearchRequest("live-directory-token", Mode: QueryMode.Code),
+                    IndexedJsonContext.Default.SearchRequest);
+                if (!resp.IsSuccessStatusCode) return false;
+                await using var stream = await resp.Content.ReadAsStreamAsync();
+                var body = JsonSerializer.Deserialize(stream, IndexedJsonContext.Default.SearchResponse);
+                return body is { Matches.Count: > 0 };
+            });
+        }
+        finally
+        {
+            await host.DisposeAsync();
+        }
     }
 }

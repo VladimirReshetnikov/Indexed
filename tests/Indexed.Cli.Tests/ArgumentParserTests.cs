@@ -1,3 +1,4 @@
+using System.IO;
 using Indexed.Abstractions;
 using Indexed.Cli;
 using Xunit;
@@ -29,6 +30,7 @@ public sealed class ArgumentParserTests
     [InlineData("status", CliCommand.Status)]
     [InlineData("rescan", CliCommand.Rescan)]
     [InlineData("stop", CliCommand.Stop)]
+    [InlineData("daemons", CliCommand.Daemons)]
     public void BareVerb_Parses(string arg, CliCommand expected)
     {
         var r = ArgumentParser.Parse(new[] { arg });
@@ -158,6 +160,90 @@ public sealed class ArgumentParserTests
     }
 
     [Fact]
+    public void Find_SingleRoot_BarePath_Parses()
+    {
+        var r = ArgumentParser.Parse(new[] { "find", "p", "--root", @"C:\src\workspace" });
+
+        Assert.Equal(CliCommand.Find, r.Command);
+        var root = Assert.Single(r.Roots!);
+        Assert.Null(root.Name);
+        Assert.Equal(Path.GetFullPath(@"C:\src\workspace"), root.Path);
+    }
+
+    [Fact]
+    public void Find_SingleRoot_PathContainingEquals_StillParsesAsBarePath()
+    {
+        var r = ArgumentParser.Parse(new[] { "find", "p", "--root", @"C:\src\dir=with-equals" });
+
+        Assert.Equal(CliCommand.Find, r.Command);
+        var root = Assert.Single(r.Roots!);
+        Assert.Null(root.Name);
+        Assert.Equal(Path.GetFullPath(@"C:\src\dir=with-equals"), root.Path);
+    }
+
+    [Fact]
+    public void Find_SingleRoot_LabelSyntax_RendersDiagnostic()
+    {
+        var r = ArgumentParser.Parse(new[] { "find", "p", "--root", @"sdk=C:\src\sdk" });
+
+        Assert.Equal(CliCommand.Help, r.Command);
+        Assert.Contains("bare path", r.Diagnostic);
+    }
+
+    [Fact]
+    public void Find_MultiRoot_LabeledSyntax_Parses()
+    {
+        var r = ArgumentParser.Parse(new[]
+        {
+            "find", "p",
+            "--root", @"docs=C:\src\docs",
+            "--root", @"sdk=C:\src\sdk",
+        });
+
+        Assert.Equal(CliCommand.Find, r.Command);
+        Assert.Collection(
+            r.Roots!,
+            root =>
+            {
+                Assert.Equal("docs", root.Name);
+                Assert.Equal(Path.GetFullPath(@"C:\src\docs"), root.Path);
+            },
+            root =>
+            {
+                Assert.Equal("sdk", root.Name);
+                Assert.Equal(Path.GetFullPath(@"C:\src\sdk"), root.Path);
+            });
+    }
+
+    [Fact]
+    public void Find_MultiRoot_RequiresLabels()
+    {
+        var r = ArgumentParser.Parse(new[]
+        {
+            "find", "p",
+            "--root", @"C:\src\docs",
+            "--root", @"sdk=C:\src\sdk",
+        });
+
+        Assert.Equal(CliCommand.Help, r.Command);
+        Assert.Contains("LABEL=PATH", r.Diagnostic);
+    }
+
+    [Fact]
+    public void Find_RepoRoot_And_Root_AreMutuallyExclusive()
+    {
+        var r = ArgumentParser.Parse(new[]
+        {
+            "find", "p",
+            "--repo-root", @"C:\repo",
+            "--root", @"C:\tree",
+        });
+
+        Assert.Equal(CliCommand.Help, r.Command);
+        Assert.Contains("mutually exclusive", r.Diagnostic);
+    }
+
+    [Fact]
     public void Find_UnknownOption_RendersDiagnostic()
     {
         var r = ArgumentParser.Parse(new[] { "find", "p", "--wat" });
@@ -206,6 +292,7 @@ public sealed class ArgumentParserTests
     {
         var r = ArgumentParser.Parse(new[] { "find", "foo" });
         Assert.False(r.NoDefaultExcludes);
+        Assert.False(r.NoDefaultDirectoryExcludes);
     }
 
     [Fact]
@@ -245,6 +332,27 @@ public sealed class ArgumentParserTests
         Assert.Equal(new[] { "lib/**" }, r.IndexExcludeGlob);
     }
 
+    [Fact]
+    public void Find_NoDefaultDirectoryExcludes_WithRoot_SetsTrue()
+    {
+        var r = ArgumentParser.Parse(new[]
+        {
+            "find", "foo", "--root", @"C:\tree", "--no-default-directory-excludes",
+        });
+
+        Assert.Equal(CliCommand.Find, r.Command);
+        Assert.True(r.NoDefaultDirectoryExcludes);
+    }
+
+    [Fact]
+    public void Find_NoDefaultDirectoryExcludes_WithoutRoot_RendersDiagnostic()
+    {
+        var r = ArgumentParser.Parse(new[] { "find", "foo", "--no-default-directory-excludes" });
+
+        Assert.Equal(CliCommand.Help, r.Command);
+        Assert.Contains("--root", r.Diagnostic);
+    }
+
     // ----- --idle-timeout-seconds -----
 
     [Theory]
@@ -265,5 +373,23 @@ public sealed class ArgumentParserTests
         var r = ArgumentParser.Parse(new[] { "status", "--idle-timeout-seconds", "x" });
         Assert.Equal(CliCommand.Help, r.Command);
         Assert.Contains("--idle-timeout-seconds", r.Diagnostic);
+    }
+
+    [Theory]
+    [InlineData("daemons")]
+    [InlineData("daemons", "--json")]
+    public void Daemons_Parses(params string[] args)
+    {
+        var r = ArgumentParser.Parse(args);
+        Assert.Equal(CliCommand.Daemons, r.Command);
+    }
+
+    [Fact]
+    public void Daemons_RejectsUnsupportedOptions()
+    {
+        var r = ArgumentParser.Parse(new[] { "daemons", "--root", @"C:\tree" });
+
+        Assert.Equal(CliCommand.Help, r.Command);
+        Assert.Contains("only supports --json", r.Diagnostic);
     }
 }

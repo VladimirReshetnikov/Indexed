@@ -73,11 +73,11 @@ public sealed class FullScanIndexerTests : IDisposable
             ("sub/c.cs", "epsilon zeta"),
         });
 
-        var gitRepo = GitRepository.Open(repo);
+        var target = GitIndexTarget.Open(repo);
         var dbPath = Path.Combine(_tempRoot, "index.db");
         await using var index = SqliteIndex.OpenOrCreate(dbPath);
 
-        var stats = await new FullScanIndexer(gitRepo, index).RunAsync();
+        var stats = await new FullScanIndexer(target, index).RunAsync();
 
         Assert.Equal(3, stats.Total);
         Assert.Equal(3, stats.Indexed);
@@ -86,21 +86,21 @@ public sealed class FullScanIndexerTests : IDisposable
 
         var candidates = await index.QueryCodeCandidatesAsync("\"eps\"", default);
         var rows = await index.GetFilesAsync(candidates, default);
-        Assert.Contains(rows, r => r.Path == "sub/c.cs");
+        Assert.Contains(rows, r => r.LogicalPath == "sub/c.cs");
     }
 
     [Fact]
     public async Task RunAsync_SecondRun_AllUnchanged()
     {
         var repo = InitRepo(new[] { ("a.cs", "hello world") });
-        var gitRepo = GitRepository.Open(repo);
+        var target = GitIndexTarget.Open(repo);
         var dbPath = Path.Combine(_tempRoot, "index.db");
 
         await using var index = SqliteIndex.OpenOrCreate(dbPath);
-        var first = await new FullScanIndexer(gitRepo, index).RunAsync();
+        var first = await new FullScanIndexer(target, index).RunAsync();
         Assert.Equal(1, first.Indexed);
 
-        var second = await new FullScanIndexer(gitRepo, index).RunAsync();
+        var second = await new FullScanIndexer(target, index).RunAsync();
         Assert.Equal(1, second.Total);
         Assert.Equal(0, second.Indexed); // SHA matches → unchanged
         Assert.Equal(1, second.Unchanged);
@@ -111,10 +111,11 @@ public sealed class FullScanIndexerTests : IDisposable
     {
         var repo = InitRepo(new[] { ("a.cs", "x") });
         var gitRepo = GitRepository.Open(repo);
+        var target = GitIndexTarget.Open(repo);
         var dbPath = Path.Combine(_tempRoot, "index.db");
 
         await using var index = SqliteIndex.OpenOrCreate(dbPath);
-        await new FullScanIndexer(gitRepo, index).RunAsync();
+        await new FullScanIndexer(target, index).RunAsync();
 
         var head = index.GetMeta(SqliteSchema.MetaKey_IndexedHead);
         Assert.False(string.IsNullOrEmpty(head));
@@ -122,5 +123,10 @@ public sealed class FullScanIndexerTests : IDisposable
 
         var at = index.GetMeta(SqliteSchema.MetaKey_LastFullScanAt);
         Assert.False(string.IsNullOrEmpty(at));
+
+        var roots = await index.GetRootsAsync(default);
+        var root = Assert.Single(roots);
+        Assert.True(root.IsPrimary);
+        Assert.Equal(Path.GetFullPath(repo), root.AbsolutePath);
     }
 }

@@ -26,7 +26,7 @@ public sealed class DebouncingEventQueueTests
 
         Assert.Single(batch);
         Assert.IsType<FileChanged>(batch[0]);
-        Assert.Equal("a.cs", ((FileChanged)batch[0]).RelativePath);
+        Assert.Equal("a.cs", ((FileChanged)batch[0]).LogicalPath);
     }
 
     [Fact]
@@ -43,7 +43,7 @@ public sealed class DebouncingEventQueueTests
         var batch = await queue.DequeueAsync();
 
         // Per-path debouncing collapses them into one.
-        var aEvents = batch.OfType<FileChanged>().Where(e => e.RelativePath == "a.cs").ToList();
+        var aEvents = batch.OfType<FileChanged>().Where(e => e.LogicalPath == "a.cs").ToList();
         Assert.Single(aEvents);
     }
 
@@ -108,8 +108,8 @@ public sealed class DebouncingEventQueueTests
 
         // The last event for the path wins — should be FileDeleted.
         var aEvent = batch.OfType<IndexEvent>()
-            .FirstOrDefault(e => e is FileChanged fc && fc.RelativePath == "a.cs"
-                             || e is FileDeleted fd && fd.RelativePath == "a.cs");
+            .FirstOrDefault(e => e is FileChanged fc && fc.LogicalPath == "a.cs"
+                             || e is FileDeleted fd && fd.LogicalPath == "a.cs");
         Assert.IsType<FileDeleted>(aEvent);
     }
 

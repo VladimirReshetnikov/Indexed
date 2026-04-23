@@ -5,6 +5,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Indexed.Abstractions;
 using Indexed.Core;
+using Indexed.Targets;
 using Xunit;
 
 namespace Indexed.Core.Tests;
@@ -50,12 +51,24 @@ public sealed class CodeQueryExecutorDiskReadTests : IDisposable
         try { Directory.Delete(_tempDir, true); } catch { }
     }
 
+    private long UpsertPrimaryRoot(WriterScope scope)
+    {
+        var absoluteRoot = Path.GetFullPath(_repoRoot);
+        var bindings = SqliteIndex.UpsertRoots(
+            scope,
+            new[] { new TargetRoot(Name: null, AbsolutePath: absoluteRoot, IsPrimary: true) });
+        return bindings[TargetPathUtilities.NormalizeForComparison(absoluteRoot)];
+    }
+
     private async Task<SqliteIndex> SeedAsync(string relPath, string content)
     {
         var index = SqliteIndex.OpenOrCreate(_dbPath);
         await using var scope = await index.BeginWriteAsync();
+        var rootId = UpsertPrimaryRoot(scope);
         SqliteIndex.UpsertFile(
             scope,
+            rootId,
+            relPath,
             relPath,
             mtimeUtc: 1,
             sizeBytes: content.Length,
@@ -126,7 +139,7 @@ public sealed class CodeQueryExecutorDiskReadTests : IDisposable
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
         var batch = await repairQueue.DequeueAsync(cts.Token);
         var repair = Assert.IsType<FileDeleted>(batch.Single());
-        Assert.Equal("gone.cs", repair.RelativePath);
+        Assert.Equal("gone.cs", repair.LogicalPath);
     }
 
     [Fact]

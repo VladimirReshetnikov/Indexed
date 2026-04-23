@@ -1,0 +1,9 @@
+<Project Sdk="Microsoft.NET.Sdk">
+    <PropertyGroup>
+        <AssemblyName>Indexed.Targets</AssemblyName>
+        <RootNamespace>Indexed.Targets</RootNamespace>
+    </PropertyGroup>
+    <ItemGroup>
+        <InternalsVisibleTo Include="Indexed.Targets.Tests" />
+    </ItemGroup>
+</Project>

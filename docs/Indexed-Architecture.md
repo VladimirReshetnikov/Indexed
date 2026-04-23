@@ -6,13 +6,19 @@
 
 ## 1. System overview
 
-Indexed is a background-indexed full-text search service for a single local git repository. It runs as a long-lived daemon process (`Indexed.Service`) with an HTTP/JSON surface on `127.0.0.1`, and a thin CLI client (`idx`).
+Indexed is a background-indexed full-text search service for a single local workspace target. A target can be:
+
+- a git repository (`git-repo`);
+- a standalone directory tree (`directory-tree`);
+- an explicit set of disjoint labeled roots (`directory-set`).
+
+It runs as a long-lived daemon process (`Indexed.Service`) with an HTTP/JSON surface on `127.0.0.1`, and a thin CLI client (`idx`).
 
 Primary consumers are AI coding agents. The service is designed for:
 
 - **Millisecond-class code search** via SQLite FTS5 with trigram tokenization.
 - **Regex search** via a Russ Cox–style trigram narrowing + .NET `Regex` verification.
-- **Eventually-consistent incremental updates** via `FileSystemWatcher`, git HEAD polling, and periodic reconciliation.
+- **Eventually-consistent incremental updates** via `FileSystemWatcher`, optional git HEAD polling, and periodic reconciliation.
 - **Crash-safe persistence** via SQLite WAL mode with single-writer concurrency.
 
 ### Architecture diagram
@@ -20,7 +26,7 @@ Primary consumers are AI coding agents. The service is designed for:
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
 │                          idx CLI (Indexed.Cli)                      │
-│   Argument parsing → DaemonClient (HTTP) → Output formatting       │
+│  Argument parsing → target selection → DaemonClient → formatting   │
 └───────────────────────────────┬─────────────────────────────────────┘
                                 │ HTTP/JSON on 127.0.0.1:<port>
 ┌───────────────────────────────▼─────────────────────────────────────┐
@@ -45,7 +51,7 @@ Primary consumers are AI coding agents. The service is designed for:
 │  │           │                  │                    │            │   │
 │  │  ┌────────▼──────────────────▼────────────────────▼────────┐  │   │
 │  │  │  RegexTrigrams   FullScanIndexer   DebouncingEventQueue │  │   │
-│  │  │  TextDecoder     PathGlob          RepoWatcher          │  │   │
+│  │  │  TextDecoder     PathGlob          DirectoryWatcher     │  │   │
 │  │  │  LanguageGuess   MatchExtraction   HeadPoller           │  │   │
 │  │  │  FileContent     ExcludeFilter     IndexOptimizer       │  │   │
 │  │  │  Provider                          ReconciliationSched  │  │   │
@@ -53,9 +59,15 @@ Primary consumers are AI coding agents. The service is designed for:
 │  └───────────────────────────────────────────────────────────────┘   │
 │                                                                      │
 │  ┌────────────────────────────────────────────────────────────────┐  │
+│  │                    Indexed.Targets                             │  │
+│  │  TargetSpec, TargetId, directory targets, logical-path rules  │  │
+│  └────────────────────────────────────────────────────────────────┘  │
+│                                                                      │
+│  ┌────────────────────────────────────────────────────────────────┐  │
 │  │                      Indexed.Git                               │  │
 │  │  GitProcess (retry, timeout, env sanitization)                 │  │
-│  │  GitRepository (ls-files, diff-tree, check-attr, rev-parse)   │  │
+│  │  GitRepository + GitIndexTarget                                │  │
+│  │  (ls-files, diff-tree, check-attr, rev-parse)                  │  │
 │  └────────────────────────────────────────────────────────────────┘  │
 │                                                                      │
 │  ┌───────────────────────┐                                          │
@@ -66,18 +78,20 @@ Primary consumers are AI coding agents. The service is designed for:
 
 ## 2. Project structure and dependencies
 
-Five source projects and five test projects:
+Six source projects and five test projects:
 
 ```
-Indexed.Abstractions  ← no dependencies; DTOs only
+Indexed.Targets       ← no dependencies; target contracts and identity
     ↑
-Indexed.Git           ← references Abstractions
+Indexed.Abstractions  ← references Targets; DTOs + JSON context
     ↑
-Indexed.Core          ← references Abstractions + Git
+Indexed.Git           ← references Targets
+    ↑
+Indexed.Core          ← references Abstractions + Git + Targets
     ↑                    NuGet: Microsoft.Data.Sqlite 9.0.8
     │                           Microsoft.Extensions.Logging.Abstractions 9.0.0
     ↑
-Indexed.Service       ← references Abstractions + Core + Git
+Indexed.Service       ← references Abstractions + Core + Git + Targets
     ↑                    NuGet: Microsoft.Extensions.Logging 9.0.0
     │                           Microsoft.Extensions.Logging.Console 9.0.0
     ↑
@@ -90,52 +104,58 @@ All projects target `net10.0-windows`, with nullable reference types enabled and
 
 | Layer | Project | Owns | Must NOT |
 |-------|---------|------|----------|
-| Contracts | `Indexed.Abstractions` | All DTOs, enums, JSON context | Depend on other Indexed projects |
-| Git adapter | `Indexed.Git` | `git.exe` invocation, repo operations | Know about FTS5, trigrams, or SQL |
+| Targets | `Indexed.Targets` | Target contracts, canonical target specs, target ids, directory targets, logical-path mapping | Depend on Git or SQLite |
+| Contracts | `Indexed.Abstractions` | All DTOs, enums, JSON context | Depend on Core, Service, or Git |
+| Git adapter | `Indexed.Git` | `git.exe` invocation, repo operations, git-backed target implementation | Know about FTS5, trigrams, or SQL |
 | Index engine | `Indexed.Core` | SQLite schema, FTS5 wrapper, query planning, full/incremental indexing, debouncing, file watching | Call HTTP, know about daemon lifecycle |
 | Service | `Indexed.Service` | Daemon bootstrap, HTTP surface, idle-exit, lifecycle | Contain query or indexing logic |
 | CLI | `Indexed.Cli` | Argument parsing, daemon launch, output formatting | Contain any indexing logic |
 
 ## 3. Data model
 
-### 3.1 Repository identity
+### 3.1 Target identity
 
-Each repository gets a stable identifier:
+Each served target gets a stable identifier:
+
+- **Legacy git-default compatibility case**: `repoId = SHA1( absolutePath(repoRoot) + "\0" + firstCommitSha )[0:12]`
+- **All other targets**: `targetId = SHA1(canonical-target-spec-byte-stream)[0:12]`
+
+The target-spec byte stream encodes target kind, normalized roots, exclude settings, and the directory-default switch. State lives under:
 
 ```
-repoId = SHA1( absolutePath(repoRoot) + "\0" + firstCommitSha )[0:12]
-```
-
-The first-commit SHA anchors identity across worktree moves. State lives under:
-
-```
-%LOCALAPPDATA%\Indexed\<repoId>\
-    daemon.json     Port, PID, startup time, shutdown token
-    index.db        SQLite database: files, FTS5 tables, metadata
+%LOCALAPPDATA%\Indexed\<targetId>\
+    daemon.json     Port, PID, target metadata, shutdown token
+    index.db        SQLite database: roots, files, FTS5 tables, metadata
     logs/           Daily-rotated structured logs
 ```
 
-### 3.2 SQLite schema (version 2)
+For compatibility, git-default targets expose both `targetId` and `repoId`, and they are equal.
 
-One database per repository. WAL journal mode for concurrent reads during writes.
+### 3.2 SQLite schema (version 3)
+
+One database per target. WAL journal mode for concurrent reads during writes.
 
 ```sql
--- Authoritative file-to-path mapping and content identity
-CREATE TABLE files (
-    file_id     INTEGER PRIMARY KEY,
-    path        TEXT UNIQUE NOT NULL,   -- repo-relative POSIX path
-    mtime_utc   INTEGER NOT NULL,       -- Unix timestamp
-    size_bytes  INTEGER NOT NULL,
-    sha256      BLOB NOT NULL,          -- content hash for change detection
-    language    TEXT,                    -- advisory: 'csharp', 'python', etc.
-    indexed_at  INTEGER NOT NULL        -- Unix timestamp
+CREATE TABLE roots (
+    root_id        INTEGER PRIMARY KEY,
+    root_name      TEXT,
+    absolute_path  TEXT UNIQUE NOT NULL,
+    is_primary     INTEGER NOT NULL
 );
-CREATE INDEX files_path_glob ON files(path);
 
--- Code index: contentless trigram FTS5 (schema v2)
--- Rowid = file_id; the posting list is kept, the text itself is not stored.
--- Snippets are rehydrated from the working tree at query time via
--- FileContentProvider.
+CREATE TABLE files (
+    file_id        INTEGER PRIMARY KEY,
+    root_id        INTEGER NOT NULL REFERENCES roots(root_id),
+    relative_path  TEXT NOT NULL,
+    logical_path   TEXT UNIQUE NOT NULL,
+    mtime_utc      INTEGER NOT NULL,
+    size_bytes     INTEGER NOT NULL,
+    sha256         BLOB NOT NULL,
+    language       TEXT,
+    indexed_at     INTEGER NOT NULL,
+    UNIQUE(root_id, relative_path)
+);
+
 CREATE VIRTUAL TABLE code_fts USING fts5(
     content,
     content = '',
@@ -143,8 +163,6 @@ CREATE VIRTUAL TABLE code_fts USING fts5(
     tokenize = 'trigram'
 );
 
--- Prose index: porter+unicode61 tokenizer for stemmed word search
--- One row per extracted prose span (Stage 3). Content stored.
 CREATE VIRTUAL TABLE prose_fts USING fts5(
     content,
     kind         UNINDEXED,
@@ -154,7 +172,6 @@ CREATE VIRTUAL TABLE prose_fts USING fts5(
     tokenize = 'porter unicode61'
 );
 
--- Small KV for schema version, repo identity, indexed HEAD, timestamps
 CREATE TABLE meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -165,10 +182,12 @@ Meta keys:
 
 | Key | Value |
 |-----|-------|
-| `schema_version` | `"2"` |
-| `repo_id` | 12-hex-char repository identifier |
-| `indexed_head` | 40-char SHA of the last fully indexed HEAD commit |
+| `schema_version` | `"3"` |
+| `target_id` | 12-hex-char target identifier |
+| `repo_id` | 12-hex-char repository identifier when the target is a compatible git default |
+| `indexed_head` | Git HEAD SHA of the last fully indexed revision (git targets only) |
 | `last_full_scan_at` | Unix timestamp of last full scan completion |
+| `last_reconciliation_at` | Unix timestamp of the last reconciliation pass |
 
 Schema changes are breaking: `SqliteIndex` detects version mismatch, deletes `index.db`, and recreates from scratch.
 
@@ -178,30 +197,32 @@ Schema version history:
 |---------|--------|-----------|
 | 1 | Initial: `code_fts` stored full content. | — |
 | 2 | `code_fts` becomes contentless (`content = ''`, `contentless_delete = 1`). | Cuts index size by ~source tree size. Requires SQLite 3.43+ for `contentless_delete`. Snippets come from disk at query time. |
+| 3 | Add `roots`, replace path-only `files` identity with `root_id + relative_path + logical_path`. | Enables directory-tree and directory-set targets while preserving the git logical-path namespace. |
 
 ### 3.3 File set
 
-The indexed file set is defined by git:
+The indexed file set depends on target kind:
 
-```
-FileSet = (git ls-files) ∪ (git ls-files --others --exclude-standard)
-```
+- **Git repository**: `(git ls-files) ∪ (git ls-files --others --exclude-standard)`
+- **Directory tree**: recursive filesystem walk rooted at the selected directory
+- **Directory set**: recursive filesystem walk unioned across all selected roots
 
-Including untracked-but-not-ignored files ensures that new files written by an agent are searchable before they are committed.
+Including untracked-but-not-ignored git files ensures that new files written by an agent are searchable before they are committed. Directory targets do not depend on git at all.
 
 A file is excluded from indexing if any of:
 
 1. Size exceeds 50 MiB (`MaxIndexableFileBytes`).
-2. First 8 KiB contains a NUL byte (binary heuristic).
-3. `git check-attr binary` reports `binary: set`.
-4. Path matches the daemon's exclude glob list.
+2. First 8 KiB contains a NUL byte (shared binary heuristic).
+3. `git check-attr binary` reports `binary: set` (git targets only).
+4. Logical path matches the daemon's exclude glob list.
 
-Exclude globs are composed at daemon startup from two sources:
+Exclude globs are composed at daemon startup from up to three sources:
 
-- **Built-in default list** (`ExcludeFilter.DefaultBinaryAdjacentGlobs`, enabled unless `--no-default-excludes`): lockfiles (`package-lock.json`, `yarn.lock`, `pnpm-lock.yaml`, `Cargo.lock`, `Gemfile.lock`, `composer.lock`, `poetry.lock`), minified JS/CSS bundles (`*.min.js`, `*.min.css`), source maps (`*.map`), generated C# (`*.Designer.cs`, `*.g.cs`, `*.g.i.cs`), and binary-adjacent tooling noise. Cuts the FTS5 trigram index substantially on repos that check in any of these (see `Indexed-Size-Reduction-SafeNearTerm-Plan.md §Workstream A`).
+- **Built-in index-shaping list** (`ExcludeFilter.DefaultBinaryAdjacentGlobs`, enabled unless `--no-default-excludes`): lockfiles, minified bundles, source maps, generated C#, and other trigram-index bloat.
+- **Built-in directory-mode safety/perf list** (`ExcludeFilter.DefaultDirectoryModeExcludes`, enabled for directory targets unless `--no-default-directory-excludes`): VCS metadata, dependency caches, IDE state, common build outputs, and platform noise.
 - **User-supplied globs** via `--exclude-index <glob>` (repeatable).
 
-The two lists are concatenated (defaults first) and applied uniformly by the full-scan indexer, the incremental indexer, and the repo watcher, so a newly dropped lockfile is ignored at every entry point.
+The lists are concatenated and applied uniformly by the full-scan indexer, the incremental indexer, and `DirectoryWatcher`, so a newly created excluded file is ignored at every entry point.
 
 ## 4. Indexing pipeline
 
@@ -209,14 +230,15 @@ The two lists are concatenated (defaults first) and applied uniformly by the ful
 
 `FullScanIndexer` runs on first startup when the index is empty:
 
-1. Enumerate files via `GitRepository.EnumerateFiles()` (tracked + untracked).
-2. Batch binary detection via `git check-attr -z binary --stdin`.
+1. Enumerate files via `IIndexTarget.EnumerateFilesAsync()`.
+2. If the target exposes explicit binary overrides (git mode via `.gitattributes`), batch them before content reads.
 3. For each non-binary, non-excluded file:
+   - Resolve `root_id`, `relative_path`, and `logical_path`.
    - Compute SHA-256; skip if unchanged from `files.sha256`.
    - Read bytes; decode via `TextDecoder` (BOM-aware: UTF-32 LE/BE, UTF-16 LE/BE, UTF-8 BOM, UTF-8 fallback).
    - UPSERT into `files` + `code_fts` within a transaction.
 4. Batch size: 200 files or 250 ms per transaction.
-5. On completion, write `indexed_head` and `last_full_scan_at` to `meta`.
+5. On completion, write `indexed_head` / revision token (when present) and `last_full_scan_at` to `meta`.
 
 ### 4.2 Incremental indexer (background worker)
 
@@ -228,24 +250,26 @@ Event types:
 |-------|--------|------------|
 | `FileChanged(path)` | FSW, reconciliation | Read bytes, SHA-compare, UPSERT if changed |
 | `FileDeleted(path)` | FSW, reconciliation | Look up `file_id`, DELETE from `files` + `code_fts` |
-| `HeadMoved(old, new)` | HeadPoller | `git diff-tree -r --name-status -z`, expand A/M/D/R/C entries to file events |
-| `ReconciliationRequested` | ReconciliationScheduler, FSW error, `/rescan` | Path-set diff: git files vs index; emit corrective events |
+| `HeadMoved(old, new)` | HeadPoller (git targets only) | `git diff-tree -r --name-status -z`, expand A/M/D/R/C entries to file events |
+| `ReconciliationRequested` | ReconciliationScheduler, FSW error, `/rescan` | Path-set diff: target enumeration vs index; emit corrective events |
 
 Transaction model: deletes and upserts each run in their own `WriterScope`. If an exception occurs, `scope.Fail()` triggers rollback. The `indexed_head` meta update runs in a dedicated scope.
 
 ### 4.3 Event sources
 
-#### FileSystemWatcher (`RepoWatcher`)
+#### FileSystemWatcher (`DirectoryWatcher`)
 
 - Recursive, 64 KB internal buffer.
-- Excludes `.git/` and configured exclude globs.
-- Normalizes paths to repo-relative POSIX (forward slashes).
+- One watcher per target root.
+- Excludes configured globs and, for directory targets, the built-in directory-mode defaults.
+- Normalizes paths to logical POSIX paths (forward slashes).
 - Rename events emit `FileDeleted(oldPath)` + `FileChanged(newPath)`.
 - On FSW error (buffer overflow), enqueues `ReconciliationRequested` as fallback.
 
 #### HEAD poller (`HeadPoller`)
 
 - 1-second timer.
+- Git targets only.
 - Cheap path: stats `.git/index` mtime first — `git rev-parse HEAD` is spawned only when mtime changes.
 - Compares HEAD SHA against `_lastKnownHead`; emits `HeadMoved` on difference.
 - Logarithmic backoff on consecutive errors (warns at power-of-2 counts).
@@ -291,9 +315,9 @@ A Russ Cox-style analyzer in four components:
 ### 5.3 Code query execution (`CodeQueryExecutor`)
 
 1. If the plan has an FTS5 expression: query `code_fts` for candidate `file_id` values.
-2. Fetch `(file_id, path, sha256)` rows in batches of 256 files. No content column — schema v2 is contentless.
-3. If a path glob is specified: filter candidates against `files.path`.
-4. For each candidate: read the file from disk via `FileContentProvider` (rooted at the repo root). If the file is missing, unreadable, or oversize (> `MaxIndexableFileBytes`), drop the candidate and enqueue a `FileChanged` repair so the incremental indexer converges.
+2. Fetch `(file_id, logical_path, sha256)` rows in batches of 256 files. No content column — the code index is contentless.
+3. If a path glob is specified: filter candidates against `files.logical_path`.
+4. For each candidate: read the file from disk via `FileContentProvider` (rooted at the selected target). If the file is missing, unreadable, or oversize (> `MaxIndexableFileBytes`), drop the candidate and enqueue a repair event so the incremental indexer converges.
 5. Run the compiled `Regex` (regex mode) or `string.IndexOf` (literal mode) against the live on-disk content.
 6. Extract line, column, byte offset, context lines via `MatchExtraction`.
 7. Apply per-file cap (`maxMatchesPerFile`, default 20) and global cap (`maxMatches`, default 200).
@@ -317,22 +341,22 @@ The FTS5 posting list is a *candidate oracle*, not the source of truth for match
 
 ### 6.1 Startup sequence
 
-1. **Open repository**: `GitRepository.Open(repoRoot)` walks up to find `.git`.
-2. **Compute repo ID**: `SHA1(abspath + "\0" + firstCommitSha)[0:12]`.
-3. **Resolve paths**: `%LOCALAPPDATA%\Indexed\<repoId>\{daemon.json, index.db, logs/}`. The local (non-roaming) application data folder is used because `index.db` is a machine-specific, reconstructible-from-source derived artifact that must not replicate across devices.
-4. **Acquire mutex**: `Global\Indexed-<repoId>` named mutex (Windows). Handles `AbandonedMutexException` from crashed predecessors.
+1. **Resolve target**: git repository, directory tree, or directory set from `DaemonOptions`.
+2. **Compute target ID**: legacy `repoId` for the default git case; otherwise the canonical target-spec hash.
+3. **Resolve paths**: `%LOCALAPPDATA%\Indexed\<targetId>\{daemon.json, index.db, logs/}`. The local (non-roaming) application data folder is used because `index.db` is a machine-specific, reconstructible-from-source derived artifact that must not replicate across devices.
+4. **Acquire mutex**: `Global\Indexed-<targetId>` named mutex (Windows). Handles `AbandonedMutexException` from crashed predecessors.
 5. **Bind listener**: `TcpListener` on `127.0.0.1:0` for OS-assigned ephemeral port; transfer to `HttpListener`.
 6. **Open index**: `SqliteIndex.OpenOrCreate(index.db)`. On corruption or schema mismatch: delete and recreate.
-7. **Full scan** (if index empty): run `FullScanIndexer`.
-8. **Construct the content provider**: `FileContentProvider` rooted at the repo. Contentless FTS5 means the search backend rehydrates match text from disk, not from the index.
-9. **Start incremental pipeline**:
+7. **Construct the content provider**: `FileContentProvider` rooted at the selected target. Contentless FTS5 means the search backend rehydrates match text from disk, not from the index.
+8. **Start incremental pipeline**:
    - `DebouncingEventQueue` (event broker; also receives repair events from the query executor)
    - `IncrementalIndexer` (background worker)
-   - `RepoWatcher` (FSW)
-   - `HeadPoller` (1-second timer)
+   - `DirectoryWatcher` (armed before the initial scan)
+   - optional `HeadPoller` (git targets only)
    - `ReconciliationScheduler` (5-minute timer)
+9. **Full scan** (if index empty): run `FullScanIndexer`.
 10. **Start the background optimizer** (`IndexOptimizer`): a 15-minute timer (configurable via `DaemonOptions.OptimizerInterval`) that runs bounded FTS5 segment merges. Each tick calls `SqliteIndex.RunFts5MergeAsync(pageBudget)` (default 512 pages) — enough to reclaim fragmentation from recent batch commits without stalling the writer. Skipped entirely when the writer has been idle since the previous tick.
-11. **Write `daemon.json`**: atomic temp-file + rename. Contains port, PID, repo info, shutdown token.
+11. **Write `daemon.json`**: atomic temp-file + rename. Contains port, PID, target info, repo compatibility metadata (if any), and shutdown token.
 12. **Start idle-exit timer**: fires callback after 30 minutes of no activity.
 
 ### 6.2 Request loop
@@ -433,7 +457,7 @@ Both delete and upsert scopes in `IncrementalIndexer` wrap their work in `try/ca
 
 - `HeadPoller`: logarithmic backoff on consecutive errors; only warns at power-of-2 counts to avoid log flooding.
 - `ReconciliationScheduler`: catches `InvalidOperationException` when the channel is completed during shutdown.
-- `RepoWatcher`: on FSW error, enqueues `ReconciliationRequested` instead of crashing.
+- `DirectoryWatcher`: on FSW error, enqueues `ReconciliationRequested` instead of crashing.
 
 ## 11. Failure modes and recovery
 
@@ -456,9 +480,10 @@ Both delete and upsert scopes in `IncrementalIndexer` wrap their work in `try/ca
 - **Localhost-only binding**: `HttpListener` on `127.0.0.1`.
 - **No authentication** for read endpoints (`/status`, `/search`).
 - **Shutdown token**: `/shutdown` requires `X-Indexed-Shutdown-Token` header matching a 32-byte random token generated at startup and written to `daemon.json`.
-- **Path containment**: Only reads files under the repo root.
+- **Path containment**: Only reads files under the selected target roots; every logical path is re-resolved and checked to remain under its owning root before opening.
 - **No outbound network**: No remote connections.
-- **Read-only repo access**: Files opened read-only; writable state under `%LOCALAPPDATA%\Indexed\<repoId>\`.
+- **Read-only target access**: Files opened read-only; writable state under `%LOCALAPPDATA%\Indexed\<targetId>\`.
+- **Directory-mode caveat**: Read endpoints are intentionally unauthenticated, so pointing `--root` at sensitive directories effectively makes them searchable by other local processes that can reach loopback HTTP. Indexed documents this and leaves root choice to the operator.
 
 ## 13. Performance targets
 
@@ -475,17 +500,17 @@ Both delete and upsert scopes in `IncrementalIndexer` wrap their work in `try/ca
 
 ## 14. Test coverage
 
-313 tests across 5 test projects:
+Coverage is organized across five test projects:
 
-| Test project | Tests | Coverage |
-|-------------|-------|----------|
-| `Indexed.Abstractions.Tests` | 32 | JSON serialization round-trips for all DTOs |
-| `Indexed.Git.Tests` | 26 | Diff-tree parsing, untracked file listing, index mtime, rename handling |
-| `Indexed.Core.Tests` | 165 | SQLite operations (incl. contentless FTS5 shadow-table invariants), full scan, incremental indexer (FSW, HEAD, reconciliation), query planning, regex trigrams, debouncing, text decoder, path glob, exclude filter, index optimizer, disk-read snippet rehydration |
-| `Indexed.Service.Tests` | 54 | HTTP contract, daemon info, idle-exit timer, repo ID, default-exclude wiring, optimizer integration |
-| `Indexed.Cli.Tests` | 36 | Argument parsing, output formatting, exclude-default flag plumbing |
+| Test project | Coverage |
+|-------------|----------|
+| `Indexed.Abstractions.Tests` | JSON serialization round-trips for DTO evolution, including target metadata and freshness compatibility fields |
+| `Indexed.Git.Tests` | Diff-tree parsing, untracked file listing, index mtime, rename handling, and git-target behavior |
+| `Indexed.Core.Tests` | SQLite operations (including schema v3 roots/files layout), full scan, incremental indexing, directory targets, reconciliation, query planning, regex trigrams, debouncing, text decoding, globs, excludes, and disk-read snippet rehydration |
+| `Indexed.Service.Tests` | HTTP contract, daemon info, idle-exit timer, target selection, daemon catalog, default-exclude wiring, and end-to-end git/directory host scenarios |
+| `Indexed.Cli.Tests` | Argument parsing, root-selection grammar, daemon-list formatting, and status/search output formatting |
 
-Integration tests in `Indexed.Core.Tests`, `Indexed.Git.Tests`, and `Indexed.Service.Tests` spin up real git repositories in temp directories and exercise end-to-end scenarios.
+Integration tests in `Indexed.Core.Tests` and `Indexed.Service.Tests` spin up real directory trees and git repositories in temp directories and exercise end-to-end scenarios for both git and non-git targets.
 
 ## 15. Future work (Stage 3 and beyond)
 

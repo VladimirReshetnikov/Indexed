@@ -9,6 +9,7 @@
         <ProjectReference Include="../Indexed.Abstractions/Indexed.Abstractions.csproj" />
         <ProjectReference Include="../Indexed.Core/Indexed.Core.csproj" />
         <ProjectReference Include="../Indexed.Git/Indexed.Git.csproj" />
+        <ProjectReference Include="../Indexed.Targets/Indexed.Targets.csproj" />
     </ItemGroup>
     <ItemGroup>
         <PackageReference Include="Microsoft.Extensions.Logging" Version="9.0.0" />

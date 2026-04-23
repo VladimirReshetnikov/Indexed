@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Indexed.Targets;
 
 namespace Indexed.Abstractions;
 
@@ -48,8 +49,11 @@ namespace Indexed.Abstractions;
 [JsonSerializable(typeof(Freshness))]
 [JsonSerializable(typeof(OptimizerStats))]
 [JsonSerializable(typeof(QueryMode))]
+[JsonSerializable(typeof(RevisionKind))]
 [JsonSerializable(typeof(SpanKind))]
 [JsonSerializable(typeof(SortBy))]
+[JsonSerializable(typeof(TargetKind))]
+[JsonSerializable(typeof(TargetRoot))]
 [JsonSerializable(typeof(IndexedErrorCode))]
 public sealed partial class IndexedJsonContext : JsonSerializerContext
 {

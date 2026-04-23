@@ -4,14 +4,14 @@ using System.IO;
 namespace Indexed.Service;
 
 /// <summary>
-/// Resolves the per-repository paths the daemon reads and writes.
+/// Resolves the per-target paths the daemon reads and writes.
 /// </summary>
 /// <remarks>
 /// <para>
 /// Root layout (Windows):
 /// </para>
 /// <code>
-/// %LOCALAPPDATA%\Indexed\&lt;repoId&gt;\
+/// %LOCALAPPDATA%\Indexed\&lt;targetId&gt;\
 ///     daemon.json
 ///     logs\indexed-YYYYMMDD.log
 ///     index.db            (added in S2)
@@ -25,7 +25,7 @@ namespace Indexed.Service;
 /// </para>
 /// <para>
 /// Tests override the base path by passing <paramref name="baseDirectory"/>
-/// to <see cref="ForRepo"/>. Production code passes the empty string (default)
+/// to <see cref="ForTarget"/>. Production code passes the empty string (default)
 /// so the class resolves <c>%LOCALAPPDATA%\Indexed</c> from the environment.
 /// </para>
 /// </remarks>
@@ -40,7 +40,7 @@ public sealed class DaemonPaths
     }
 
     /// <summary>
-    /// Per-repo root (<c>%LOCALAPPDATA%\Indexed\&lt;repoId&gt;</c>). Created by
+    /// Per-target root (<c>%LOCALAPPDATA%\Indexed\&lt;targetId&gt;</c>). Created by
     /// <see cref="EnsureCreated"/>.
     /// </summary>
     public string RootDirectory { get; }
@@ -58,25 +58,30 @@ public sealed class DaemonPaths
     public string IndexDbPath { get; }
 
     /// <summary>
-    /// Resolve paths for the repo identified by <paramref name="repoId"/>.
+    /// Resolve paths for the target identified by <paramref name="targetId"/>.
     /// </summary>
-    /// <param name="repoId">
-    /// 12-character id returned by <see cref="RepoId.Compute"/>.
+    /// <param name="targetId">
+    /// 12-character id returned by target identity computation.
     /// </param>
     /// <param name="baseDirectory">
     /// Override the parent of the per-repo directory. Pass <c>null</c> or
     /// empty to use <c>%LOCALAPPDATA%\Indexed</c>; pass a temp directory in tests.
     /// </param>
-    public static DaemonPaths ForRepo(string repoId, string? baseDirectory = null)
+    public static DaemonPaths ForTarget(string targetId, string? baseDirectory = null)
     {
-        if (string.IsNullOrEmpty(repoId))
-            throw new ArgumentException("repoId must be non-empty", nameof(repoId));
+        if (string.IsNullOrEmpty(targetId))
+            throw new ArgumentException("targetId must be non-empty", nameof(targetId));
 
         var parent = string.IsNullOrEmpty(baseDirectory)
             ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Indexed")
             : baseDirectory;
 
-        return new DaemonPaths(Path.Combine(parent, repoId));
+        return new DaemonPaths(Path.Combine(parent, targetId));
+    }
+
+    public static DaemonPaths ForRepo(string repoId, string? baseDirectory = null)
+    {
+        return ForTarget(repoId, baseDirectory);
     }
 
     /// <summary>

@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using Indexed.Abstractions;
+using Indexed.Targets;
 
 namespace Indexed.Cli;
 
@@ -58,6 +59,13 @@ public sealed record CliArguments
     public string? RepoRoot { get; init; }
 
     /// <summary>
+    /// Optional directory-target roots selected via repeated <c>--root</c>.
+    /// One root means <c>directory-tree</c>; multiple labeled roots mean
+    /// <c>directory-set</c>.
+    /// </summary>
+    public IReadOnlyList<TargetRootSpec>? Roots { get; init; }
+
+    /// <summary>
     /// Index-time exclude globs forwarded to the daemon on launch.
     /// Matching files are skipped during full-scan indexing.
     /// </summary>
@@ -69,6 +77,12 @@ public sealed record CliArguments
     /// Maps to <c>--no-default-excludes</c> on the CLI.
     /// </summary>
     public bool NoDefaultExcludes { get; init; }
+
+    /// <summary>
+    /// When <c>true</c>, the daemon will not apply the directory-mode default
+    /// exclude list. Only meaningful when <see cref="Roots"/> is non-empty.
+    /// </summary>
+    public bool NoDefaultDirectoryExcludes { get; init; }
 
     /// <summary>
     /// Optional override forwarded to the daemon at launch to change its
@@ -85,7 +99,7 @@ public sealed record CliArguments
     public string? Diagnostic { get; init; }
 }
 
-/// <summary>Top-level CLI verb.</summary>
+    /// <summary>Top-level CLI verb.</summary>
 public enum CliCommand
 {
     /// <summary>Default when parsing fails or --help is requested.</summary>
@@ -102,4 +116,7 @@ public enum CliCommand
 
     /// <summary>Ask the daemon to exit gracefully.</summary>
     Stop,
+
+    /// <summary>List daemon descriptors found under the Indexed app-data root.</summary>
+    Daemons,
 }

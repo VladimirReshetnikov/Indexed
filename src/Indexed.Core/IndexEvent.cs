@@ -7,7 +7,7 @@ namespace Indexed.Core;
 /// <remarks>
 /// Events are produced by three sources:
 /// <list type="bullet">
-///   <item><description><see cref="RepoWatcher"/> — FSW-driven <see cref="FileChanged"/>/<see cref="FileDeleted"/>.</description></item>
+///   <item><description><see cref="DirectoryWatcher"/> — FSW-driven <see cref="FileChanged"/>/<see cref="FileDeleted"/>.</description></item>
 ///   <item><description><see cref="HeadPoller"/> — <see cref="HeadMoved"/> when HEAD diverges from <c>indexed_head</c>.</description></item>
 ///   <item><description><see cref="ReconciliationScheduler"/> — periodic <see cref="ReconciliationRequested"/>.</description></item>
 /// </list>
@@ -18,15 +18,15 @@ public abstract record IndexEvent;
 /// A file was created or modified in the working tree. The incremental
 /// indexer will read, SHA, and upsert if the content has actually changed.
 /// </summary>
-/// <param name="RelativePath">Repository-relative POSIX path (forward-slash separators).</param>
-public sealed record FileChanged(string RelativePath) : IndexEvent;
+/// <param name="LogicalPath">Logical path in the target namespace (forward-slash separators).</param>
+public sealed record FileChanged(string LogicalPath) : IndexEvent;
 
 /// <summary>
 /// A file was deleted from the working tree. The incremental indexer will
 /// remove the corresponding index entry if one exists.
 /// </summary>
-/// <param name="RelativePath">Repository-relative POSIX path.</param>
-public sealed record FileDeleted(string RelativePath) : IndexEvent;
+/// <param name="LogicalPath">Logical path in the target namespace.</param>
+public sealed record FileDeleted(string LogicalPath) : IndexEvent;
 
 /// <summary>
 /// HEAD has moved to a different commit. The incremental indexer will run

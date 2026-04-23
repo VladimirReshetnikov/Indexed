@@ -23,7 +23,7 @@ is the reference you reach for once you know what you are doing.
 7. [Configuring what gets indexed](#7-configuring-what-gets-indexed)
 8. [Understanding freshness](#8-understanding-freshness)
 9. [JSON output for scripts and agents](#9-json-output-for-scripts-and-agents)
-10. [Working in multiple repositories](#10-working-in-multiple-repositories)
+10. [Working in multiple targets](#10-working-in-multiple-targets)
 11. [Troubleshooting checklist](#11-troubleshooting-checklist)
 12. [What to read next](#12-what-to-read-next)
 
@@ -31,9 +31,11 @@ is the reference you reach for once you know what you are doing.
 
 ## 1. What is Indexed, and when should I use it?
 
-Indexed is a **per-repository code search daemon** for Windows. You talk to it
-with the `idx` command-line tool; it replies with ripgrep-style output in the
-terminal, or with JSON if you ask for it.
+Indexed is a **per-target code search daemon** for Windows. You talk to it with
+the `idx` command-line tool; it replies with ripgrep-style output in the
+terminal, or with JSON if you ask for it. A target can be a git repository, a
+single directory tree, or an explicit multi-root workspace selected with
+`--root`.
 
 The design goal is **"`rg` speed without `rg`'s per-query warm-up"**. On a
 small repo the difference is invisible. On a repo with tens of thousands of
@@ -48,7 +50,7 @@ every subsequent query lands in tens of milliseconds because:
 
 **Reach for Indexed when:**
 
-- You search the same repository dozens of times in a session.
+- You search the same repository or directory workspace dozens of times in a session.
 - You want symmetric context lines (`-A`, `-B`, `-C`) with low latency.
 - You want structured JSON output that a script or agent can consume.
 - Your queries include `--kind` filters (code-vs-comment-vs-markdown) that
@@ -56,7 +58,7 @@ every subsequent query lands in tens of milliseconds because:
 
 **Reach for `rg` instead when:**
 
-- You are doing a one-off search in a repo you will not revisit.
+- You are doing a one-off search in a repo or directory tree you will not revisit.
 - You want to search files that are deliberately excluded from the index
   (lockfiles, minified bundles — see §7.2). `rg` ignores nothing by default.
 - You need features Indexed does not yet expose (for example, replace-in-place
@@ -66,39 +68,47 @@ The two tools are complementary. Most contributors keep both on PATH.
 
 ## 2. First run: let the daemon come up
 
-Once `idx` is on PATH, there is **no separate init step**. From inside any git
-repository, run:
+Once `idx` is on PATH, there is **no separate init step**. The two common first
+run shapes are:
 
 ```bash
+# Git mode: from inside a repository
 cd C:\path\to\your\repo
 idx status
+
+# Directory mode: from anywhere, with an explicit root
+idx status --root C:\path\to\your\workspace
 ```
 
 On first use you will see a short pause (a few seconds on a small repo, up to
 a couple of minutes on a hundred-thousand-file repo). Under the hood:
 
-1. `idx` computes a stable **repo ID** from the repo root path and the first
-   commit SHA.
-2. It looks for `%LOCALAPPDATA%\Indexed\<repoId>\daemon.json`. Not finding one,
-   it launches the daemon.
-3. The daemon enumerates every file that is either git-tracked or
-   untracked-but-not-ignored (`git ls-files` plus
-   `git ls-files --others --exclude-standard`), classifies each as code, prose,
-   or binary, and builds the trigram index in `index.db`.
+1. `idx` resolves a target and computes a stable **target ID** for it.
+   Default git mode keeps the legacy `repoId` behavior; explicit directory
+   targets use a canonical target-spec hash.
+2. It looks for `%LOCALAPPDATA%\Indexed\<targetId>\daemon.json`. Not finding
+   one, it launches the daemon.
+3. The daemon enumerates the target's files:
+   - git mode: tracked plus untracked-not-ignored files;
+   - directory mode: a direct recursive filesystem walk rooted at the selected
+     directory or directories.
+   It classifies each candidate as code, prose, or binary, and builds the
+   trigram index in `index.db`.
 4. When indexing finishes, `idx status` returns.
 
 Expected output after the first run:
 
 ```
 Indexed daemon v0.1.0  pid=12345
-  repo:    C:\path\to\your\repo
-  repoId:  a1b2c3d4e5f6
-  schema:  2
-  started: 2026-04-16T19:14:30Z
-  head:    bd61955fe507... (indexed: bd61955fe507...)
-  stale:   no
-  pending: 0 files
-  last scan: 2026-04-16T19:14:42Z
+daemon v0.1.0 pid=12345 schema=3
+target  GitRepository a1b2c3d4e5f6
+root    C:\path\to\your\repo
+repo    C:\path\to\your\repo
+repoId  a1b2c3d4e5f6
+started 2026-04-16T19:14:30.0000000+00:00
+rev     kind=Git current=bd61955fe507..., indexed=bd61955fe507...
+stale   False (pending=0)
+recon   2026-04-16T19:14:42.0000000+00:00
 ```
 
 Key things to notice:
@@ -360,7 +370,7 @@ idx find "lockfileVersion"                        # now works
 When you are done, another `idx stop` followed by a plain `idx status`
 puts things back.
 
-### 7.3 Adding your own per-repo excludes
+### 7.3 Adding your own per-target excludes
 
 Paths you never want indexed (generated output directories, vendored
 dependencies) should be excluded at daemon launch:
@@ -446,26 +456,32 @@ A minimal jq pipeline to list the top hits:
 idx find "SqliteIndex" --json | jq -r '.matches[] | "\(.path):\(.line)"'
 ```
 
-## 10. Working in multiple repositories
+## 10. Working in multiple targets
 
-Each repository gets its **own** daemon, its **own** index, and its
-**own** directory under `%LOCALAPPDATA%\Indexed\<repoId>\`. Two daemons
-for two repos can happily run side-by-side — they listen on separate
-ephemeral ports and do not share any state.
+Each target gets its **own** daemon, its **own** index, and its **own**
+directory under `%LOCALAPPDATA%\Indexed\<targetId>\`. Two daemons for two
+targets can happily run side-by-side — they listen on separate ephemeral
+ports and do not share any state.
 
-The repo ID is derived from the absolute path **and** the first commit
-SHA, so:
+Common patterns:
 
-- Two clones of the same repo at different paths are treated as
-  **different** repositories (separate indexes).
-- A repo with a rewritten history (new first commit) is treated as a
-  **new** repository. The old index becomes orphaned and you can delete
+- Two clones of the same git repo at different paths are treated as
+  **different** targets (separate indexes).
+- A repo with rewritten history (new first commit) is treated as a
+  **new** git target. The old index becomes orphaned and you can delete
   its directory.
+- A single directory tree selected with `--root C:\src\scratch` gets its own
+  target.
+- A labeled multi-root workspace such as
+  `--root core=C:\src\proj\src --root docs=C:\src\proj\docs` gets a stable
+  `directory-set` target whose logical paths are `core/...` and `docs/...`.
 
-If you have many repos and want to reclaim space, it is safe to delete
-any `%LOCALAPPDATA%\Indexed\<repoId>\` subdirectory whose `daemon.json`
-is absent (i.e., no daemon is currently running for it). The directory
-will be regenerated the next time you run `idx` inside that repo.
+Use `idx daemons` to see which daemon descriptors currently exist.
+
+If you want to reclaim space, it is safe to delete any
+`%LOCALAPPDATA%\Indexed\<targetId>\` subdirectory whose daemon is no longer
+running. The directory will be regenerated the next time you address that
+target.
 
 ## 11. Troubleshooting checklist
 
@@ -475,16 +491,16 @@ Pick the symptom that matches yours.
 
 The daemon could not be reached or launched.
 
-1. Is `git` on PATH? `git --version` should succeed.
+1. If you are using git mode, is `git` on PATH? `git --version` should succeed.
 2. Can the CLI locate `Indexed.Service.exe`? If you see an error about the
    daemon executable, publish/install `idx.exe` and `Indexed.Service.exe`
    side-by-side or set `INDEXED_SERVICE_EXE` (see the usage guide §1.3).
-3. Is the current directory inside a git repo? `git rev-parse --show-toplevel`.
-4. Is a stale `daemon.json` pointing at a dead PID? Check
-   `%LOCALAPPDATA%\Indexed\<repoId>\daemon.json`. Delete it (or kill the
+3. If you are using git mode, is the current directory inside a git repo? `git rev-parse --show-toplevel`.
+4. Is a stale `daemon.json` pointing at a dead PID? Run `idx daemons` or check
+   `%LOCALAPPDATA%\Indexed\<targetId>\daemon.json`. Delete it (or kill the
    PID it names) and retry.
 5. Look at the daemon log at
-   `%LOCALAPPDATA%\Indexed\<repoId>\logs\`.
+   `%LOCALAPPDATA%\Indexed\<targetId>\logs\`.
 
 ### 11.2 Results look stale no matter what
 
@@ -494,7 +510,7 @@ The daemon could not be reached or launched.
    minutes. `last scan` gives you a timestamp.
 2. Did something externally overwrite half the working tree (rebase, bulk
    sync, partial checkout)? Run `idx rescan` and watch `pending` drain.
-3. As a last resort: `idx stop`, delete the `index.db*` files in the repo's
+3. As a last resort: `idx stop`, delete the `index.db*` files in the target's
    app-data directory, and `idx status` again to trigger a rebuild.
 
 ### 11.3 Results include files you thought were excluded
@@ -520,7 +536,7 @@ Trigram indexing is fast, but it can be space-hungry. It is normal for
 `index.db` to be a significant fraction of the indexed corpus (and for very
 large repos, potentially comparable to it).
 
-Also note that much of what you see in `%LOCALAPPDATA%\Indexed\<repoId>\` at
+Also note that much of what you see in `%LOCALAPPDATA%\Indexed\<targetId>\` at
 any given moment can be the SQLite **WAL** (`index.db-wal`) — it grows during
 bursts of indexing and collapses on graceful shutdown or the next checkpoint.
 If you are concerned, `idx stop` forces a checkpoint and often shrinks the
@@ -553,7 +569,8 @@ step is ever required.
 - [`Indexed-Index-Size-Reduction-Strategies.md`](./Indexed-Index-Size-Reduction-Strategies.md)
   — advanced reading for very large repos.
 
-You should now be able to run Indexed productively on any git repo on
-your machine. When something does not behave the way you expect, the
+You should now be able to run Indexed productively on git repositories and
+explicit directory workspaces on your machine. When something does not behave
+the way you expect, the
 three commands `idx status`, `idx rescan`, and `idx stop` — in that
 order — resolve the overwhelming majority of day-to-day problems.

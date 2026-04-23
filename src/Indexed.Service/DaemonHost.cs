@@ -10,6 +10,7 @@ using System.Threading.Tasks;
 using Indexed.Abstractions;
 using Indexed.Core;
 using Indexed.Git;
+using Indexed.Targets;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 
@@ -28,11 +29,11 @@ namespace Indexed.Service;
 /// <para>
 /// Request handlers are cheap — they delegate to an <see cref="ISearchBackend"/>
 /// for <c>/search</c> and return cached metadata for everything else. The host
-/// owns the per-repo <see cref="SqliteIndex"/>: it opens <c>index.db</c>
+/// owns the per-target <see cref="SqliteIndex"/>: it opens <c>index.db</c>
 /// during <see cref="StartAsync"/>, runs an initial full scan when required
 /// (empty DB or schema mismatch), and wires incremental indexing
-/// (<see cref="RepoWatcher"/>, <see cref="HeadPoller"/>, and background
-/// reconciliation) before entering the request loop. <c>POST /rescan</c>
+/// (<see cref="DirectoryWatcher"/>, optional <see cref="IRevisionTracker"/>,
+/// and background reconciliation) before entering the request loop. <c>POST /rescan</c>
 /// enqueues a reconciliation request and returns immediately; the actual work
 /// happens asynchronously on the incremental indexer worker.
 /// </para>
@@ -70,8 +71,11 @@ internal sealed class DaemonHost : IAsyncDisposable
     private readonly SemaphoreSlim _adminGate = new(MaxConcurrentAdmin, MaxConcurrentAdmin);
     private const int MaxConcurrentAdmin = 4;
 
+    private IIndexTarget? _target;
+    private GitIndexTarget? _gitTarget;
     private GitRepository? _repo;
     private string? _repoId;
+    private string? _targetId;
     private DaemonPaths? _paths;
     private Mutex? _singletonMutex;
     private HttpListener? _listener;
@@ -82,8 +86,8 @@ internal sealed class DaemonHost : IAsyncDisposable
     private IndexStatistics? _lastScan;
     private DebouncingEventQueue? _eventQueue;
     private IncrementalIndexer? _incrementalIndexer;
-    private RepoWatcher? _repoWatcher;
-    private HeadPoller? _headPoller;
+    private DirectoryWatcher? _directoryWatcher;
+    private IRevisionTracker? _revisionTracker;
     private ReconciliationScheduler? _reconciliationScheduler;
     private IndexOptimizer? _indexOptimizer;
 
@@ -110,9 +114,20 @@ internal sealed class DaemonHost : IAsyncDisposable
     /// </remarks>
     public async Task StartAsync(CancellationToken cancellationToken = default)
     {
-        _repo = GitRepository.Open(_options.RepoRoot);
-        _repoId = RepoId.Compute(_repo.RepoRoot, _repo.GetFirstCommitSha());
-        _paths = DaemonPaths.ForRepo(_repoId, _options.AppDataBase);
+        var targetSelection = _options.TargetSelection ?? new TargetSelection
+        {
+            RepoRoot = _options.RepoRoot,
+            IndexExcludeGlobs = _options.IndexExcludeGlobs,
+            UseDefaultIndexExcludes = _options.UseDefaultIndexExcludes,
+            UseDefaultDirectoryExcludes = _options.UseDefaultDirectoryExcludes,
+        };
+
+        _target = targetSelection.OpenTarget(cancellationToken);
+        _gitTarget = _target as GitIndexTarget;
+        _repo = _gitTarget?.Repository;
+        _repoId = _gitTarget?.RepositoryId;
+        _targetId = _target.TargetId;
+        _paths = DaemonPaths.ForTarget(_targetId, _options.AppDataBase);
         _paths.EnsureCreated();
 
         if (_options.UseSingletonMutex && OperatingSystem.IsWindows())
@@ -126,40 +141,19 @@ internal sealed class DaemonHost : IAsyncDisposable
         }
         else
         {
-            // Merge user-supplied exclude globs with the built-in defaults
-            // (lockfiles, minified bundles, generated C#, …) unless the caller
-            // has opted out via UseDefaultIndexExcludes = false.
-            var effectiveExcludes = _options.UseDefaultIndexExcludes
-                ? ExcludeFilter.Combine(_options.IndexExcludeGlobs, ExcludeFilter.DefaultBinaryAdjacentGlobs)
-                : _options.IndexExcludeGlobs;
+            var effectiveExcludes = BuildEffectiveExcludes(_target.Spec);
 
             _index = SqliteIndex.OpenOrCreate(_paths.IndexDbPath);
             _index.SetMeta(Indexed.Core.SqliteSchema.MetaKey_RepoId, _repoId);
 
-            if (_options.RunInitialScan && _index.GetFileCount() == 0)
-            {
-                _logger.LogInformation("index is empty; running full scan");
-                var scanStarted = Stopwatch.StartNew();
-                var indexer = new FullScanIndexer(_repo, _index, effectiveExcludes, _logger);
-                _lastScan = await indexer.RunAsync(progress: null, cancellationToken).ConfigureAwait(false);
-                _logger.LogInformation(
-                    "initial full scan complete: indexed={Indexed} skipped={Skipped} unchanged={Unchanged} total={Total} elapsed={ElapsedMs}ms",
-                    _lastScan.Indexed, _lastScan.Skipped, _lastScan.Unchanged, _lastScan.Total,
-                    scanStarted.ElapsedMilliseconds);
-            }
-
-            // Stage 4: start the incremental indexer pipeline.
             _eventQueue = new DebouncingEventQueue();
 
             // Schema v2: FTS5 is contentless — the backend reads live content
             // from disk at query time via FileContentProvider. Failed reads
             // (missing, unreadable, oversize) are fed back into the event
             // queue so the incremental indexer self-heals.
-            var contentProvider = new FileContentProvider(_repo.RepoRoot);
-            _backend = new SqliteSearchBackend(_index, BuildFreshness, contentProvider, _eventQueue);
-
             _incrementalIndexer = new IncrementalIndexer(
-                _repo, _index, _eventQueue, effectiveExcludes, _logger);
+                _target, _index, _eventQueue, effectiveExcludes, _logger);
 
             // Background FTS5 segment merger. Subscribes to BatchCommitted so
             // it only runs during idle periods that followed real write work.
@@ -172,25 +166,47 @@ internal sealed class DaemonHost : IAsyncDisposable
             _incrementalIndexer.BatchCommitted += () => _idleTimer?.Poke();
             _incrementalIndexer.BatchCommitted += () => _indexOptimizer?.NotifyDirty();
             _incrementalIndexer.Start();
-            _indexOptimizer.Start();
 
-            _repoWatcher = new RepoWatcher(
-                _repo.RepoRoot, _eventQueue, effectiveExcludes, _logger);
-            _repoWatcher.Start();
+            _directoryWatcher = new DirectoryWatcher(
+                _target, _eventQueue, effectiveExcludes, _logger);
+            _directoryWatcher.Start();
 
-            _headPoller = new HeadPoller(
-                _repo, _index, _eventQueue, interval: null, _logger);
-            _headPoller.Start();
+            if (_repo is not null)
+            {
+                _revisionTracker = new HeadPoller(
+                    _repo, _index, _eventQueue, interval: null, _logger);
+                _revisionTracker.Start();
+            }
 
             _reconciliationScheduler = new ReconciliationScheduler(
                 _eventQueue, interval: null, _logger);
             _reconciliationScheduler.Start();
+
+            if (_options.RunInitialScan && _index.GetFileCount() == 0)
+            {
+                _logger.LogInformation("index is empty; running full scan");
+                var scanStarted = Stopwatch.StartNew();
+                var indexer = new FullScanIndexer(_target, _index, effectiveExcludes, _logger);
+                _lastScan = await indexer.RunAsync(progress: null, cancellationToken).ConfigureAwait(false);
+                _logger.LogInformation(
+                    "initial full scan complete: indexed={Indexed} skipped={Skipped} unchanged={Unchanged} total={Total} elapsed={ElapsedMs}ms",
+                    _lastScan.Indexed, _lastScan.Skipped, _lastScan.Unchanged, _lastScan.Total,
+                    scanStarted.ElapsedMilliseconds);
+            }
+
+            var contentProvider = new FileContentProvider(_target);
+            _backend = new SqliteSearchBackend(_index, BuildFreshness, contentProvider, _eventQueue);
+            _indexOptimizer.Start();
         }
 
         _info = new DaemonInfo(
             Port: _listener!.Prefixes.Count == 0 ? 0 : ExtractPort(_listener),
             Pid: Environment.ProcessId,
-            RepoRoot: _repo.RepoRoot,
+            TargetKind: _target!.Spec.Kind,
+            TargetId: _target.TargetId,
+            Roots: _target.Roots,
+            PrimaryRoot: _target.Roots[0],
+            RepoRoot: _repo?.RepoRoot,
             RepoId: _repoId,
             StartedAt: _startedAt,
             DaemonVersion: _options.DaemonVersion,
@@ -204,8 +220,8 @@ internal sealed class DaemonHost : IAsyncDisposable
         });
 
         _logger.LogInformation(
-            "daemon listening on port {Port}, repoId={RepoId}, pid={Pid}",
-            _info.Port, _info.RepoId, _info.Pid);
+            "daemon listening on port {Port}, targetId={TargetId}, pid={Pid}",
+            _info.Port, _info.TargetId, _info.Pid);
     }
 
     /// <summary>
@@ -287,8 +303,8 @@ internal sealed class DaemonHost : IAsyncDisposable
 
         // Stage 4: stop watcher/poller/scheduler first, then drain the
         // incremental indexer worker, then close the index.
-        _repoWatcher?.Dispose();
-        _headPoller?.Dispose();
+        _directoryWatcher?.Dispose();
+        _revisionTracker?.Dispose();
         _reconciliationScheduler?.Dispose();
 
         if (_incrementalIndexer is not null)
@@ -483,11 +499,15 @@ internal sealed class DaemonHost : IAsyncDisposable
             DaemonVersion: _options.DaemonVersion,
             SchemaVersion: _index?.SchemaVersion ?? 0,
             Pid: Environment.ProcessId,
-            RepoRoot: _repo!.RepoRoot,
-            RepoId: _repoId!,
+            RepoRoot: _gitTarget?.Repository.RepoRoot,
+            RepoId: _repoId,
             StartedAt: _startedAt,
             Freshness: BuildFreshness(),
-            Optimizer: BuildOptimizerStats());
+            Optimizer: BuildOptimizerStats(),
+            TargetKind: _target!.Spec.Kind,
+            TargetId: _target.TargetId,
+            Roots: _target.Roots,
+            PrimaryRoot: _target.Roots[0]);
 
     /// <summary>
     /// Project <see cref="IndexOptimizer"/> counters into the serializable
@@ -509,15 +529,20 @@ internal sealed class DaemonHost : IAsyncDisposable
 
     private Freshness BuildFreshness()
     {
-        string? head = _headPoller?.LastKnownHead;
-        if (string.IsNullOrEmpty(head))
+        var revisionKind = _target?.Spec.Kind == TargetKind.GitRepository
+            ? RevisionKind.GitHead
+            : RevisionKind.None;
+
+        string? revisionToken = _revisionTracker?.LastKnownRevisionToken;
+        if (string.IsNullOrEmpty(revisionToken))
         {
-            try { head = _repo!.GetHeadSha(); }
-            catch { /* transient git error — leave as null */ }
+            try { revisionToken = _target?.GetCurrentRevisionToken(); }
+            catch { /* transient target error — leave as null */ }
         }
 
-        string? indexedHead = null;
+        string? indexedRevisionToken = null;
         DateTimeOffset? lastFullScan = null;
+        DateTimeOffset? lastReconciliation = null;
         string? note = null;
 
         if (_index is null)
@@ -526,8 +551,8 @@ internal sealed class DaemonHost : IAsyncDisposable
         }
         else
         {
-            indexedHead = _index.GetMeta(SqliteSchema.MetaKey_IndexedHead);
-            if (string.IsNullOrEmpty(indexedHead)) indexedHead = null;
+            indexedRevisionToken = _index.GetMeta(SqliteSchema.MetaKey_IndexedHead);
+            if (string.IsNullOrEmpty(indexedRevisionToken)) indexedRevisionToken = null;
 
             var lastScanRaw = _index.GetMeta(SqliteSchema.MetaKey_LastFullScanAt);
             if (!string.IsNullOrEmpty(lastScanRaw)
@@ -535,9 +560,16 @@ internal sealed class DaemonHost : IAsyncDisposable
             {
                 lastFullScan = DateTimeOffset.FromUnixTimeSeconds(lastScanUnix);
             }
+
+            var lastReconciliationRaw = _index.GetMeta(SqliteSchema.MetaKey_LastReconciliationAt);
+            if (!string.IsNullOrEmpty(lastReconciliationRaw)
+                && long.TryParse(lastReconciliationRaw, NumberStyles.Integer, CultureInfo.InvariantCulture, out var lastReconciliationUnix))
+            {
+                lastReconciliation = DateTimeOffset.FromUnixTimeSeconds(lastReconciliationUnix);
+            }
         }
 
-        var currentHead = string.IsNullOrEmpty(head) ? null : head;
+        var currentRevisionToken = string.IsNullOrEmpty(revisionToken) ? null : revisionToken;
         var pendingCount = _eventQueue?.PendingCount ?? 0;
         // Fold the indexer's in-flight flag in so a caller that happens to
         // read /status between DequeueAsync (decrements pendingCount) and
@@ -545,25 +577,42 @@ internal sealed class DaemonHost : IAsyncDisposable
         // freshness window briefly reports isStale=false for work that has
         // not yet been applied.
         var inFlight = _incrementalIndexer?.IsProcessingBatch ?? false;
-        var isStale = indexedHead is null
-            || currentHead is null
-            || !string.Equals(indexedHead, currentHead, StringComparison.Ordinal)
-            || pendingCount > 0
-            || inFlight;
+        var isStale = pendingCount > 0 || inFlight;
+        if (revisionKind != RevisionKind.None)
+        {
+            isStale = isStale
+                || indexedRevisionToken is null
+                || currentRevisionToken is null
+                || !string.Equals(indexedRevisionToken, currentRevisionToken, StringComparison.Ordinal);
+        }
 
         return new Freshness(
-            IndexedHead: indexedHead,
-            CurrentHead: currentHead,
+            IndexedHead: indexedRevisionToken,
+            CurrentHead: currentRevisionToken,
             PendingFileCount: pendingCount,
             LastFullScanAt: lastFullScan,
             IsStale: isStale,
-            Note: note);
+            Note: note,
+            IndexedRevisionToken: indexedRevisionToken,
+            CurrentRevisionToken: currentRevisionToken,
+            RevisionKind: revisionKind,
+            LastReconciliationAt: lastReconciliation);
+    }
+
+    private static IReadOnlyList<string>? BuildEffectiveExcludes(TargetSpec spec)
+    {
+        IReadOnlyList<string>? excludes = spec.IndexExcludeGlobs;
+        if (spec.UseDefaultIndexExcludes)
+            excludes = ExcludeFilter.Combine(excludes, ExcludeFilter.DefaultBinaryAdjacentGlobs);
+        if (spec.UseDefaultDirectoryExcludes)
+            excludes = ExcludeFilter.Combine(excludes, ExcludeFilter.DefaultDirectoryModeExcludes);
+        return excludes;
     }
 
     private void AcquireMutex()
     {
 #pragma warning disable CA1416 // Mutex name with "Global\" prefix is Windows-only; gated above.
-        var name = $"Global\\Indexed-{_repoId}";
+        var name = $"Global\\Indexed-{_targetId}";
         _singletonMutex = new Mutex(initiallyOwned: false, name, out var createdNew);
         try
         {
@@ -571,7 +620,7 @@ internal sealed class DaemonHost : IAsyncDisposable
             {
                 _singletonMutex.Dispose();
                 _singletonMutex = null;
-                throw new DaemonAlreadyRunningException(_repoId!);
+                throw new DaemonAlreadyRunningException(_targetId!);
             }
         }
         catch (AbandonedMutexException)
@@ -683,15 +732,15 @@ internal sealed class DaemonHost : IAsyncDisposable
 
 /// <summary>
 /// Thrown by <see cref="DaemonHost.StartAsync"/> when another daemon process
-/// already holds the single-instance mutex for the repo.
+/// already holds the single-instance mutex for the target.
 /// </summary>
 public sealed class DaemonAlreadyRunningException : Exception
 {
-    public string RepoId { get; }
+    public string TargetId { get; }
 
-    public DaemonAlreadyRunningException(string repoId)
-        : base($"another Indexed daemon is already running for repoId={repoId}")
+    public DaemonAlreadyRunningException(string targetId)
+        : base($"another Indexed daemon is already running for targetId={targetId}")
     {
-        RepoId = repoId;
+        TargetId = targetId;
     }
 }

@@ -1,7 +1,9 @@
 using System;
 using System.IO;
+using System.Linq;
 using System.Threading.Tasks;
 using Indexed.Service;
+using Indexed.Targets;
 using Xunit;
 
 namespace Indexed.Service.Tests;
@@ -24,9 +26,14 @@ public sealed class DaemonInfoTests : IDisposable
     [Fact]
     public void WriteAtomic_CreatesFileAndRoundTrips()
     {
+        var root = new TargetRoot(null, @"C:\repos\foo", true);
         var info = new DaemonInfo(
             Port: 5123,
             Pid: 42,
+            TargetKind: TargetKind.GitRepository,
+            TargetId: "abc123def456",
+            Roots: new[] { root },
+            PrimaryRoot: root,
             RepoRoot: @"C:\repos\foo",
             RepoId: "abc123def456",
             StartedAt: new DateTimeOffset(2026, 4, 15, 0, 0, 0, TimeSpan.Zero),
@@ -39,7 +46,17 @@ public sealed class DaemonInfoTests : IDisposable
         Assert.True(File.Exists(path));
         var round = DaemonInfo.TryRead(path);
         Assert.NotNull(round);
-        Assert.Equal(info, round);
+        Assert.Equal(info.Port, round!.Port);
+        Assert.Equal(info.Pid, round.Pid);
+        Assert.Equal(info.TargetKind, round.TargetKind);
+        Assert.Equal(info.TargetId, round.TargetId);
+        Assert.Equal(info.PrimaryRoot, round.PrimaryRoot);
+        Assert.Equal(info.RepoRoot, round.RepoRoot);
+        Assert.Equal(info.RepoId, round.RepoId);
+        Assert.Equal(info.StartedAt, round.StartedAt);
+        Assert.Equal(info.DaemonVersion, round.DaemonVersion);
+        Assert.Equal(info.ShutdownToken, round.ShutdownToken);
+        Assert.True(info.Roots.SequenceEqual(round.Roots));
     }
 
     [Fact]
@@ -50,8 +67,15 @@ public sealed class DaemonInfoTests : IDisposable
         var path = Path.Combine(_tempDir, "daemon.json");
         File.WriteAllText(path, "old contents");
 
+        var root = new TargetRoot(null, ".", true);
         var info = new DaemonInfo(
-            Port: 1, Pid: 1, RepoRoot: ".", RepoId: "a",
+            Port: 1, Pid: 1,
+            TargetKind: TargetKind.GitRepository,
+            TargetId: "a",
+            Roots: new[] { root },
+            PrimaryRoot: root,
+            RepoRoot: ".",
+            RepoId: "a",
             StartedAt: DateTimeOffset.UtcNow, DaemonVersion: "v", ShutdownToken: "t");
         info.WriteAtomic(path);
 
@@ -63,7 +87,19 @@ public sealed class DaemonInfoTests : IDisposable
     public void WriteAtomic_DoesNotLeaveTempFiles()
     {
         var path = Path.Combine(_tempDir, "daemon.json");
-        var info = new DaemonInfo(1, 1, ".", "a", DateTimeOffset.UtcNow, "v", "t");
+        var root = new TargetRoot(null, ".", true);
+        var info = new DaemonInfo(
+            1,
+            1,
+            TargetKind.GitRepository,
+            "a",
+            new[] { root },
+            root,
+            ".",
+            "a",
+            DateTimeOffset.UtcNow,
+            "v",
+            "t");
         info.WriteAtomic(path);
 
         var siblings = Directory.EnumerateFiles(_tempDir);

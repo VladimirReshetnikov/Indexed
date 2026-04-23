@@ -1,5 +1,4 @@
 using System;
-using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
 using Indexed.Service;
@@ -7,56 +6,30 @@ using Microsoft.Extensions.Logging;
 
 // Entry point for the detached daemon process.
 //
-// Accepts a single positional argument (the repository root). Additional
-// switches:
+// Legacy form:
+//   Indexed.Service.exe <repo-root>
+//
+// Current switches:
+//   --repo-root <dir>                   Git compatibility target
+//   --root <dir>                        Single directory-tree target
+//   --root <label=dir> [--root ...]     Multi-root directory-set target
 //   --idle-timeout-seconds <n>   Override the 30-minute idle-exit window.
 //   --app-data <dir>             Override %LOCALAPPDATA%\Indexed for tests.
+//   --exclude-index <glob>       Repeatable extra index-time excludes.
+//   --no-default-excludes        Disable the binary-adjacent default excludes.
+//   --no-default-directory-excludes
+//                                Disable the directory-mode default excludes.
 //
-// On successful startup writes %LOCALAPPDATA%\Indexed\<repoId>\daemon.json
+// On successful startup writes %LOCALAPPDATA%\Indexed\<targetId>\daemon.json
 // with the bound port and shutdown token, then blocks on the HTTP request
 // loop until cancellation or an authenticated /shutdown request.
 
-var repoRoot = args.Length > 0 ? args[0] : Directory.GetCurrentDirectory();
-var idleSeconds = (int)TimeSpan.FromMinutes(30).TotalSeconds;
-string? appData = null;
-var excludeGlobs = new System.Collections.Generic.List<string>();
-var useDefaultExcludes = true;
-
-for (var i = 1; i < args.Length; i++)
-{
-    switch (args[i])
-    {
-        case "--idle-timeout-seconds":
-            if (i + 1 < args.Length && int.TryParse(args[++i], out var n))
-                idleSeconds = n;
-            break;
-        case "--app-data":
-            if (i + 1 < args.Length)
-                appData = args[++i];
-            break;
-        case "--exclude-index":
-            if (i + 1 < args.Length)
-                excludeGlobs.Add(args[++i]);
-            break;
-        case "--no-default-excludes":
-            useDefaultExcludes = false;
-            break;
-    }
-}
+var options = DaemonCommandLine.ParseOptions(args);
 
 using var factory = LoggerFactory.Create(builder =>
     builder.AddSimpleConsole(o => { o.SingleLine = true; o.TimestampFormat = "HH:mm:ss "; })
            .SetMinimumLevel(LogLevel.Information));
 var logger = factory.CreateLogger<DaemonHost>();
-
-var options = new DaemonOptions
-{
-    RepoRoot = repoRoot,
-    AppDataBase = appData,
-    IdleTimeout = TimeSpan.FromSeconds(idleSeconds),
-    IndexExcludeGlobs = excludeGlobs.Count > 0 ? excludeGlobs : null,
-    UseDefaultIndexExcludes = useDefaultExcludes,
-};
 
 await using var host = new DaemonHost(options, logger);
 

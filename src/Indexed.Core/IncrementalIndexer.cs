@@ -1,11 +1,10 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
-using System.Linq;
 using System.Security.Cryptography;
 using System.Threading;
 using System.Threading.Tasks;
-using Indexed.Git;
+using Indexed.Targets;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 
@@ -13,47 +12,47 @@ namespace Indexed.Core;
 
 /// <summary>
 /// Single-threaded background worker that drains <see cref="DebouncingEventQueue"/>
-/// and applies incremental index updates: per-file upserts, diff-tree-based HEAD
-/// patching, and periodic reconciliation.
+/// and applies incremental index updates: per-file upserts, optional
+/// revision-diff expansion, and periodic reconciliation.
 /// </summary>
 /// <remarks>
 /// <para>
 /// Architecture: one long-running <see cref="Task"/> drains batches from the
-/// queue. Each batch is processed inside one or more <see cref="WriterScope"/>s
-/// (currently a delete scope followed by an upsert-plus-HEAD-advance scope).
+/// queue. Each batch is processed inside one or more <see cref="WriterScope"/>s.
 /// <see cref="SqliteIndex"/> serializes all writers via
 /// <see cref="SqliteIndex.BeginWriteAsync"/>, so concurrent writers from
 /// other subsystems (full-scan at startup, FTS merge in
-/// <see cref="IndexOptimizer"/>) are safe but cannot overlap. Matches
-/// proposal §10 (single writer per transaction; no intra-batch interleave).
+/// <see cref="IndexOptimizer"/>) are safe but cannot overlap.
 /// </para>
 /// <para>
 /// Event processing:
 /// </para>
 /// <list type="bullet">
-///   <item><description><see cref="FileChanged"/> — read, SHA-compare, upsert if changed.</description></item>
-///   <item><description><see cref="FileDeleted"/> — look up file_id, delete if present.</description></item>
-///   <item><description><see cref="HeadMoved"/> — <c>git diff-tree</c>, apply diff, update <c>indexed_head</c>.</description></item>
-///   <item><description><see cref="ReconciliationRequested"/> — path-set diff against git, emit corrective events.</description></item>
+///   <item><description><see cref="FileChanged"/> — resolve the logical path through the target, read, SHA-compare, upsert if changed.</description></item>
+///   <item><description><see cref="FileDeleted"/> — look up <c>file_id</c> by logical path, delete if present.</description></item>
+///   <item><description><see cref="HeadMoved"/> — when the target also implements <see cref="IRevisionDiffTarget"/>, expand the revision diff and advance <c>indexed_head</c>.</description></item>
+///   <item><description><see cref="ReconciliationRequested"/> — diff the target's live logical-path set against the index contents to catch missed watcher events or daemon downtime.</description></item>
 /// </list>
 /// </remarks>
 public sealed class IncrementalIndexer : IAsyncDisposable
 {
-    private readonly GitRepository _repo;
+    private readonly IIndexTarget _target;
     private readonly SqliteIndex _index;
     private readonly DebouncingEventQueue _queue;
     private readonly ILogger _logger;
     private readonly ExcludeFilter _excludeFilter;
+    private readonly IRevisionDiffTarget? _revisionDiffTarget;
+    private readonly IExplicitBinaryPathProvider? _explicitBinaryPathProvider;
     private readonly CancellationTokenSource _cts = new();
     private Task? _workerTask;
 
-    // Cached set of repo-relative paths whose .gitattributes explicitly mark
-    // them as `binary`. Seeded in Start() and refreshed at the top of
-    // reconciliation so later edits to .gitattributes propagate without a
-    // daemon restart. Held as a single IReadOnlySet<string> reference so the
-    // hot upsert loop reads it lock-free; the reference is swapped
-    // wholesale by RefreshBinaryAttrPaths — never mutated in place.
-    private IReadOnlySet<string> _binaryAttrPaths = new HashSet<string>(StringComparer.Ordinal);
+    // Cached set of logical paths whose target-specific metadata explicitly
+    // marks them as binary. Held as a single IReadOnlySet<string> reference
+    // so the hot upsert loop reads it lock-free; refreshed by reference swap.
+    private IReadOnlySet<string> _explicitBinaryLogicalPaths = new HashSet<string>(StringComparer.Ordinal);
+
+    // Stable root_id bindings read from the roots table once per daemon start.
+    private IReadOnlyDictionary<string, long>? _rootIds;
 
     /// <summary>
     /// 0 = live, 1 = disposed. Flipped atomically via
@@ -70,7 +69,6 @@ public sealed class IncrementalIndexer : IAsyncDisposable
     /// </summary>
     private int _batchesInFlight;
 
-
     /// <summary>
     /// <c>true</c> after the worker loop exits due to an unhandled exception.
     /// Read by <c>DaemonHost.BuildStatus</c> to surface a degraded state.
@@ -81,10 +79,10 @@ public sealed class IncrementalIndexer : IAsyncDisposable
     /// <c>true</c> while the worker is in the middle of applying a batch
     /// (between <see cref="DebouncingEventQueue.DequeueAsync"/> returning and
     /// the transaction committing). DaemonHost folds this into
-    /// <see cref="Indexed.Abstractions.Freshness.IsStale"/> so callers don't
+    /// <see cref="Indexed.Abstractions.Freshness.IsStale"/> so callers do not
     /// see <c>isStale=false</c> purely because
-    /// <see cref="DebouncingEventQueue.PendingCount"/> has dropped to zero
-    /// during in-flight processing.
+    /// <see cref="DebouncingEventQueue.PendingCount"/> dropped to zero during
+    /// in-flight processing.
     /// </summary>
     public bool IsProcessingBatch => Volatile.Read(ref _batchesInFlight) > 0;
 
@@ -97,17 +95,19 @@ public sealed class IncrementalIndexer : IAsyncDisposable
     /// Create an incremental indexer.
     /// </summary>
     public IncrementalIndexer(
-        GitRepository repo,
+        IIndexTarget target,
         SqliteIndex index,
         DebouncingEventQueue queue,
         IReadOnlyList<string>? excludeGlobs = null,
         ILogger? logger = null)
     {
-        _repo = repo ?? throw new ArgumentNullException(nameof(repo));
+        _target = target ?? throw new ArgumentNullException(nameof(target));
         _index = index ?? throw new ArgumentNullException(nameof(index));
         _queue = queue ?? throw new ArgumentNullException(nameof(queue));
         _logger = logger ?? NullLogger.Instance;
         _excludeFilter = new ExcludeFilter(excludeGlobs);
+        _revisionDiffTarget = target as IRevisionDiffTarget;
+        _explicitBinaryPathProvider = target as IExplicitBinaryPathProvider;
     }
 
     /// <summary>
@@ -117,33 +117,24 @@ public sealed class IncrementalIndexer : IAsyncDisposable
     {
         if (_workerTask is not null) return;
 
-        // Seed the binary-attributes cache so the first batch already skips
-        // paths flagged by .gitattributes. A failure here is non-fatal —
-        // reconciliation will refresh the set later, and the NUL-scan
-        // fallback in IsLikelyBinary still catches common binary content.
-        try { RefreshBinaryAttrPaths(null); }
-        catch (Exception ex)
+        if (_explicitBinaryPathProvider is not null)
         {
-            _logger.LogDebug(ex, "initial binary-attr cache seed failed; will retry on reconciliation");
+            try
+            {
+                var set = _explicitBinaryPathProvider
+                    .GetExplicitBinaryLogicalPathsAsync(files: null, cancellationToken: _cts.Token)
+                    .AsTask()
+                    .GetAwaiter()
+                    .GetResult();
+                Volatile.Write(ref _explicitBinaryLogicalPaths, set);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "initial explicit binary-path seed failed; will retry during reconciliation");
+            }
         }
 
         _workerTask = Task.Run(() => WorkerLoopAsync(_cts.Token));
-    }
-
-    // Snapshot .gitattributes `binary` assignments into _binaryAttrPaths.
-    // Called from Start() (one-shot seed) and from ExpandReconciliationAsync
-    // (periodic refresh) so edits to .gitattributes eventually take effect
-    // without a daemon restart. If `files` is null, re-enumerates via
-    // `git ls-files`; callers that already have the file list should pass
-    // it to avoid the extra subprocess.
-    private void RefreshBinaryAttrPaths(IReadOnlyList<string>? files)
-    {
-        var set = files is null
-            ? _repo.GetBinaryAttrPaths(_cts.Token)
-            : _repo.GetBinaryAttrPaths(files, _cts.Token);
-        // Single-shot reference swap — readers on the worker thread pick up
-        // the new set on the next iteration without a lock.
-        Volatile.Write(ref _binaryAttrPaths, set);
     }
 
     /// <summary>
@@ -169,6 +160,8 @@ public sealed class IncrementalIndexer : IAsyncDisposable
         _logger.LogInformation("incremental indexer worker started");
         var queueDrained = false;
 
+        await EnsureRootIdsAsync(ct).ConfigureAwait(false);
+
         while (!ct.IsCancellationRequested)
         {
             IReadOnlyList<IndexEvent> batch;
@@ -181,14 +174,8 @@ public sealed class IncrementalIndexer : IAsyncDisposable
                 break;
             }
 
-            if (batch.Count == 0) { queueDrained = true; break; } // queue completed normally
+            if (batch.Count == 0) { queueDrained = true; break; }
 
-            // Mark the batch as in-flight *before* ProcessBatchAsync so that
-            // a concurrent /status between Dequeue (which decrements
-            // PendingCount) and the upsert commit still reports isStale=true.
-            // Decrement in finally — even the OperationCanceledException path
-            // must unwind the counter so a shutdown followed by restart does
-            // not leak a permanent "busy" signal.
             Interlocked.Increment(ref _batchesInFlight);
             try
             {
@@ -202,7 +189,6 @@ public sealed class IncrementalIndexer : IAsyncDisposable
             catch (Exception ex)
             {
                 _logger.LogError(ex, "error processing batch of {Count} events", batch.Count);
-                // Continue — don't crash the worker loop on transient errors.
             }
             finally
             {
@@ -211,7 +197,9 @@ public sealed class IncrementalIndexer : IAsyncDisposable
         }
 
         if (ct.IsCancellationRequested || queueDrained)
+        {
             _logger.LogInformation("incremental indexer worker stopped (shutdown)");
+        }
         else
         {
             IsFaulted = true;
@@ -221,49 +209,51 @@ public sealed class IncrementalIndexer : IAsyncDisposable
 
     private async Task ProcessBatchAsync(IReadOnlyList<IndexEvent> batch, CancellationToken ct)
     {
-        // Collect file-level work items from all events in the batch.
-        var toUpsert = new List<string>();
-        var toDelete = new List<string>();
+        var toUpsert = new HashSet<string>(StringComparer.Ordinal);
+        var toDelete = new HashSet<string>(StringComparer.Ordinal);
+        var reconciliationRequested = false;
+        string? newRevisionToken = null;
 
         foreach (var evt in batch)
         {
             switch (evt)
             {
                 case HeadMoved hm:
-                    ExpandHeadMoved(hm, toUpsert, toDelete);
+                    var expandedHead = await ExpandHeadMovedAsync(hm, toUpsert, toDelete, ct).ConfigureAwait(false);
+                    if (!string.IsNullOrEmpty(expandedHead))
+                        newRevisionToken = expandedHead;
                     break;
 
                 case ReconciliationRequested:
-                    await ExpandReconciliationAsync(toUpsert, toDelete, ct).ConfigureAwait(false);
+                    reconciliationRequested = true;
+                    var reconciledRevision = await ExpandReconciliationAsync(toUpsert, toDelete, ct).ConfigureAwait(false);
+                    if (!string.IsNullOrEmpty(reconciledRevision))
+                        newRevisionToken = reconciledRevision;
                     break;
 
                 case FileChanged fc:
-                    if (!_excludeFilter.IsExcluded(fc.RelativePath))
-                        toUpsert.Add(fc.RelativePath);
+                    if (!_excludeFilter.IsExcluded(fc.LogicalPath))
+                        toUpsert.Add(fc.LogicalPath);
                     break;
 
                 case FileDeleted fd:
-                    toDelete.Add(fd.RelativePath);
+                    toDelete.Add(fd.LogicalPath);
                     break;
             }
         }
 
-        // Deduplicate: if a path appears in both lists, delete wins (then
-        // upsert re-adds if the file actually exists on disk).
-        var deleteSet = new HashSet<string>(toDelete, StringComparer.Ordinal);
-
-        // Process deletes.
-        if (deleteSet.Count > 0)
+        if (toDelete.Count > 0)
         {
             await using var scope = await _index.BeginWriteAsync(ct).ConfigureAwait(false);
             try
             {
-                var deletedIds = new List<long>();
-                foreach (var path in deleteSet)
+                var deletedIds = new List<long>(toDelete.Count);
+                foreach (var logicalPath in toDelete)
                 {
-                    var id = _index.LookupFileIdByPath(path);
+                    var id = _index.LookupFileIdByLogicalPath(logicalPath);
                     if (id.HasValue) deletedIds.Add(id.Value);
                 }
+
                 if (deletedIds.Count > 0)
                 {
                     SqliteIndex.BulkDeleteFiles(scope, deletedIds);
@@ -278,105 +268,104 @@ public sealed class IncrementalIndexer : IAsyncDisposable
             }
         }
 
-        // Determine whether this batch also advances indexed_head so the
-        // meta write can ride inside the same upsert transaction — one batch,
-        // one commit, regardless of whether the batch contains upserts, a
-        // HeadMoved, or both.
-        string? newHead = null;
-        foreach (var evt in batch)
-        {
-            if (evt is HeadMoved hm) newHead = hm.NewHead;
-        }
-
-        // Process upserts.
         var upserted = 0;
         var unchanged = 0;
         var skipped = 0;
 
-        if (toUpsert.Count > 0 || newHead is not null)
+        if (toUpsert.Count > 0 || newRevisionToken is not null || reconciliationRequested)
         {
             await using var scope = await _index.BeginWriteAsync(ct).ConfigureAwait(false);
             try
             {
-                foreach (var relPath in toUpsert)
+                foreach (var logicalPath in toUpsert)
                 {
                     ct.ThrowIfCancellationRequested();
 
-                    if (_excludeFilter.IsExcluded(relPath) || IsBinary(relPath))
+                    if (_excludeFilter.IsExcluded(logicalPath))
                     {
                         skipped++;
                         continue;
                     }
 
-                    var full = Path.Combine(_repo.RepoRoot, relPath.Replace('/', Path.DirectorySeparatorChar));
+                    if (!_target.TryResolveLogicalPath(new LogicalPath(logicalPath), out var file))
+                    {
+                        _logger.LogDebug("skip {Path}: target could not resolve logical path", logicalPath);
+                        skipped++;
+                        continue;
+                    }
+
+                    if (IsBinary(logicalPath, file.AbsolutePath))
+                    {
+                        skipped++;
+                        continue;
+                    }
+
                     long mtimeUtc;
                     byte[] sha;
                     try
                     {
-                        var info = new FileInfo(full);
+                        var info = new FileInfo(file.AbsolutePath);
                         if (!info.Exists) { skipped++; continue; }
                         if (info.Length > IndexLimits.MaxIndexableFileBytes) { skipped++; continue; }
                         mtimeUtc = new DateTimeOffset(info.LastWriteTimeUtc, TimeSpan.Zero).ToUnixTimeSeconds();
 
-                        // Compute SHA from a stream — avoids allocating the full byte[]
-                        // for unchanged files, which are the common case.
-                        using (var shaStream = new FileStream(full, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize: 4096, useAsync: true))
+                        using (var shaStream = new FileStream(file.AbsolutePath, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize: 4096, useAsync: true))
                         {
                             sha = await SHA256.HashDataAsync(shaStream, ct).ConfigureAwait(false);
                         }
                     }
                     catch (IOException ex)
                     {
-                        _logger.LogDebug(ex, "skip {Path}: {Message}", relPath, ex.Message);
+                        _logger.LogDebug(ex, "skip {Path}: {Message}", logicalPath, ex.Message);
                         skipped++;
                         continue;
                     }
                     catch (UnauthorizedAccessException ex)
                     {
-                        _logger.LogDebug(ex, "skip {Path}: {Message}", relPath, ex.Message);
+                        _logger.LogDebug(ex, "skip {Path}: {Message}", logicalPath, ex.Message);
                         skipped++;
                         continue;
                     }
 
-                    var prior = _index.TryGetShaByPath(relPath);
+                    var prior = _index.TryGetShaByLogicalPath(logicalPath);
                     if (prior.Length == sha.Length && prior.AsSpan().SequenceEqual(sha))
                     {
                         unchanged++;
                         continue;
                     }
 
-                    // SHA differs — read the full file for content extraction.
                     byte[] bytes;
                     try
                     {
-                        bytes = await File.ReadAllBytesAsync(full, ct).ConfigureAwait(false);
-                        // Re-check after read: the file may have grown between stat and read.
+                        bytes = await File.ReadAllBytesAsync(file.AbsolutePath, ct).ConfigureAwait(false);
                         if (bytes.LongLength > IndexLimits.MaxIndexableFileBytes)
                         {
-                            _logger.LogDebug("skip {Path}: grew past size cap after read ({Size} bytes)", relPath, bytes.LongLength);
+                            _logger.LogDebug("skip {Path}: grew past size cap after read ({Size} bytes)", logicalPath, bytes.LongLength);
                             skipped++;
                             continue;
                         }
                     }
                     catch (IOException ex)
                     {
-                        _logger.LogDebug(ex, "skip {Path}: {Message}", relPath, ex.Message);
+                        _logger.LogDebug(ex, "skip {Path}: {Message}", logicalPath, ex.Message);
                         skipped++;
                         continue;
                     }
                     catch (UnauthorizedAccessException ex)
                     {
-                        _logger.LogDebug(ex, "skip {Path}: {Message}", relPath, ex.Message);
+                        _logger.LogDebug(ex, "skip {Path}: {Message}", logicalPath, ex.Message);
                         skipped++;
                         continue;
                     }
 
                     var content = TextDecoder.Decode(bytes);
-                    var language = LanguageGuess.FromPath(relPath);
+                    var language = LanguageGuess.FromPath(logicalPath);
 
                     SqliteIndex.UpsertFile(
                         scope: scope,
-                        path: relPath,
+                        rootId: GetRootId(file.Root),
+                        relativePath: file.RelativePath,
+                        logicalPath: logicalPath,
                         mtimeUtc: mtimeUtc,
                         sizeBytes: bytes.LongLength,
                         sha256: sha,
@@ -387,15 +376,18 @@ public sealed class IncrementalIndexer : IAsyncDisposable
                     upserted++;
                 }
 
-                // Land the HEAD advance inside the same commit as the
-                // upserts it described. If the upsert list was empty (a pure
-                // HeadMoved batch), this scope exists solely for the meta
-                // row and still commits atomically. The WriterScope-bound
-                // overload binds the command to the scope's transaction so
-                // a later scope.Fail() correctly rolls the meta row back in
-                // lockstep with the files that new HEAD described.
-                if (newHead is not null)
-                    SqliteIndex.SetMeta(scope, SqliteSchema.MetaKey_IndexedHead, newHead);
+                if (newRevisionToken is not null)
+                {
+                    SqliteIndex.SetMeta(scope, SqliteSchema.MetaKey_IndexedHead, newRevisionToken);
+                }
+
+                if (reconciliationRequested)
+                {
+                    SqliteIndex.SetMeta(
+                        scope,
+                        SqliteSchema.MetaKey_LastReconciliationAt,
+                        DateTimeOffset.UtcNow.ToUnixTimeSeconds().ToString(System.Globalization.CultureInfo.InvariantCulture));
+                }
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -405,156 +397,185 @@ public sealed class IncrementalIndexer : IAsyncDisposable
             }
         }
 
-        if (upserted > 0 || deleteSet.Count > 0)
+        if (upserted > 0 || toDelete.Count > 0 || reconciliationRequested || newRevisionToken is not null)
         {
             _logger.LogInformation(
                 "batch complete: upserted={Upserted} deleted={Deleted} unchanged={Unchanged} skipped={Skipped}",
-                upserted, deleteSet.Count, unchanged, skipped);
+                upserted, toDelete.Count, unchanged, skipped);
         }
     }
 
-    private void ExpandHeadMoved(HeadMoved hm, List<string> toUpsert, List<string> toDelete)
+    private async Task<string?> ExpandHeadMovedAsync(
+        HeadMoved hm,
+        ISet<string> toUpsert,
+        ISet<string> toDelete,
+        CancellationToken cancellationToken)
     {
-        IReadOnlyList<DiffTreeEntry> diff;
+        if (_revisionDiffTarget is null)
+        {
+            _logger.LogDebug("HeadMoved observed for a target without revision-diff support; requesting reconciliation");
+            _queue.Enqueue(new ReconciliationRequested());
+            return null;
+        }
+
         try
         {
-            diff = _repo.GetDiffTree(hm.OldHead, hm.NewHead);
+            await _revisionDiffTarget
+                .ExpandRevisionChangeAsync(hm.OldHead, hm.NewHead, (ICollection<string>)toUpsert, (ICollection<string>)toDelete, cancellationToken)
+                .ConfigureAwait(false);
+            _logger.LogDebug(
+                "revision moved {Old}->{New}",
+                hm.OldHead[..Math.Min(7, hm.OldHead.Length)],
+                hm.NewHead[..Math.Min(7, hm.NewHead.Length)]);
+            return hm.NewHead;
         }
-        catch (GitProcessException ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _logger.LogWarning(ex,
-                "GetDiffTree({Old}, {New}) failed — queuing full reconciliation",
+                "revision diff expansion failed for {Old}->{New}; queuing reconciliation",
                 hm.OldHead, hm.NewHead);
             _queue.Enqueue(new ReconciliationRequested());
-            return;
+            return null;
         }
-
-        foreach (var entry in diff)
-        {
-            switch (entry.Status)
-            {
-                case DiffStatus.Added:
-                case DiffStatus.Modified:
-                    toUpsert.Add(entry.Path);
-                    break;
-
-                case DiffStatus.Deleted:
-                    toDelete.Add(entry.Path);
-                    break;
-
-                case DiffStatus.Renamed:
-                    if (entry.OldPath is not null) toDelete.Add(entry.OldPath);
-                    toUpsert.Add(entry.Path);
-                    break;
-
-                case DiffStatus.Copied:
-                case DiffStatus.Unmerged:
-                    toUpsert.Add(entry.Path);
-                    break;
-            }
-        }
-
-        _logger.LogDebug("HeadMoved {Old}->{New}: {Count} diff entries",
-            hm.OldHead[..Math.Min(7, hm.OldHead.Length)],
-            hm.NewHead[..Math.Min(7, hm.NewHead.Length)],
-            diff.Count);
     }
 
-    private async Task ExpandReconciliationAsync(
-        List<string> toUpsert, List<string> toDelete, CancellationToken ct)
+    private async Task<string?> ExpandReconciliationAsync(
+        ISet<string> toUpsert,
+        ISet<string> toDelete,
+        CancellationToken ct)
     {
         _logger.LogDebug("running reconciliation");
 
-        // A: what git knows about.
-        var gitFileList = _repo.EnumerateFiles().ToList();
-        var gitFiles = new HashSet<string>(gitFileList, StringComparer.Ordinal);
-
-        // Refresh the .gitattributes `binary` override cache while we already
-        // have the authoritative file list — this is the one place that gets
-        // called periodically without costing an extra ls-files.
-        try { RefreshBinaryAttrPaths(gitFileList); }
-        catch (Exception ex)
+        var targetFiles = new List<EnumeratedFile>();
+        var livePaths = new HashSet<string>(StringComparer.Ordinal);
+        await foreach (var file in _target.EnumerateFilesAsync(ct).ConfigureAwait(false))
         {
-            _logger.LogDebug(ex, "binary-attr cache refresh during reconciliation failed");
+            targetFiles.Add(file);
+            livePaths.Add(file.LogicalPath.Value);
         }
 
-        // B: what the index has.
-        var indexed = await _index.GetAllPathsWithShaAsync(ct).ConfigureAwait(false);
+        await RefreshExplicitBinaryLogicalPathsAsync(targetFiles, ct).ConfigureAwait(false);
 
-        // A \ B: files missing from index.
-        foreach (var p in gitFiles)
+        var indexed = await _index.GetAllLogicalPathsWithShaAsync(ct).ConfigureAwait(false);
+
+        foreach (var logicalPath in livePaths)
         {
-            if (!indexed.ContainsKey(p))
-                toUpsert.Add(p);
+            if (!indexed.ContainsKey(logicalPath))
+                toUpsert.Add(logicalPath);
         }
 
-        // B \ A: files in index but not in git.
-        foreach (var p in indexed.Keys)
+        foreach (var logicalPath in indexed.Keys)
         {
-            if (!gitFiles.Contains(p))
-                toDelete.Add(p);
+            if (!livePaths.Contains(logicalPath))
+                toDelete.Add(logicalPath);
         }
 
-        // A ∩ B with stat drift: mtime or size on disk differs from what the
-        // index last recorded. The FileSystemWatcher is not 100% reliable —
-        // buffer overflows, network drives, editors that rename-in-place
-        // while the watcher is re-armed — any of these can drop a change
-        // notification. Reconciliation is the belt-and-suspenders catch.
         IReadOnlyDictionary<string, SqliteIndex.IndexedFileStat>? stats = null;
-        try { stats = await _index.GetAllPathsWithStatAsync(ct).ConfigureAwait(false); }
+        try { stats = await _index.GetAllLogicalPathsWithStatAsync(ct).ConfigureAwait(false); }
         catch (Exception ex) { _logger.LogDebug(ex, "stat-drift probe skipped"); }
+
         if (stats is not null)
         {
-            foreach (var p in gitFiles)
+            foreach (var file in targetFiles)
             {
-                if (!stats.TryGetValue(p, out var stat)) continue; // handled by "missing from index" above
-                var full = Path.Combine(_repo.RepoRoot, p.Replace('/', Path.DirectorySeparatorChar));
+                var logicalPath = file.LogicalPath.Value;
+                if (!stats.TryGetValue(logicalPath, out var stat)) continue;
+
                 try
                 {
-                    var info = new FileInfo(full);
+                    var info = new FileInfo(file.AbsolutePath);
                     if (!info.Exists) continue;
                     var diskMtime = new DateTimeOffset(info.LastWriteTimeUtc, TimeSpan.Zero).ToUnixTimeSeconds();
                     if (diskMtime != stat.MtimeUtc || info.Length != stat.SizeBytes)
-                        toUpsert.Add(p);
+                        toUpsert.Add(logicalPath);
                 }
-                catch (IOException) { /* transient — next reconciliation will retry */ }
-                catch (UnauthorizedAccessException) { /* skip */ }
+                catch (IOException) { }
+                catch (UnauthorizedAccessException) { }
             }
         }
 
-        // Check HEAD drift.
-        var currentHead = SafeGetHead();
-        var indexedHead = _index.GetMeta(SqliteSchema.MetaKey_IndexedHead);
-        if (!string.IsNullOrEmpty(currentHead)
-            && !string.IsNullOrEmpty(indexedHead)
-            && !string.Equals(currentHead, indexedHead, StringComparison.Ordinal))
+        var currentRevisionToken = SafeGetCurrentRevisionToken(ct);
+        var indexedRevisionToken = _index.GetMeta(SqliteSchema.MetaKey_IndexedHead);
+        if (_revisionDiffTarget is not null
+            && !string.IsNullOrEmpty(currentRevisionToken)
+            && !string.IsNullOrEmpty(indexedRevisionToken)
+            && !string.Equals(currentRevisionToken, indexedRevisionToken, StringComparison.Ordinal))
         {
-            // Feed through HeadMoved — this will expand into file-level events.
-            ExpandHeadMoved(new HeadMoved(indexedHead, currentHead), toUpsert, toDelete);
+            try
+            {
+                await _revisionDiffTarget
+                    .ExpandRevisionChangeAsync(indexedRevisionToken, currentRevisionToken, (ICollection<string>)toUpsert, (ICollection<string>)toDelete, ct)
+                    .ConfigureAwait(false);
+                _logger.LogDebug("reconciliation also advanced revision token {Old}->{New}", indexedRevisionToken, currentRevisionToken);
+                return currentRevisionToken;
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger.LogWarning(ex,
+                    "revision drift expansion failed during reconciliation for {Old}->{New}",
+                    indexedRevisionToken, currentRevisionToken);
+            }
         }
 
         _logger.LogDebug("reconciliation: {Upsert} to add/update, {Delete} to remove",
             toUpsert.Count, toDelete.Count);
+        return null;
     }
 
-    private string SafeGetHead()
+    private async Task EnsureRootIdsAsync(CancellationToken cancellationToken)
     {
-        try { return _repo.GetHeadSha(); }
-        catch { return string.Empty; }
+        if (_rootIds is not null)
+            return;
+
+        await using var scope = await _index.BeginWriteAsync(cancellationToken).ConfigureAwait(false);
+        _rootIds = SqliteIndex.UpsertRoots(scope, _target.Roots);
     }
 
-    private bool IsBinary(string relPath)
+    private async Task RefreshExplicitBinaryLogicalPathsAsync(
+        IReadOnlyList<EnumeratedFile>? files,
+        CancellationToken cancellationToken)
     {
-        // Honor .gitattributes `binary` overrides first — a path that the
-        // user (or a template) has pinned as binary must be skipped even if
-        // the NUL-scan would not classify it that way (e.g. generated text
-        // assets marked binary to suppress diff noise). This mirrors the
-        // full-scan policy; before this fix the incremental path ignored
-        // the override, which meant a single FSW event would re-admit
-        // paths that the initial scan had correctly skipped.
-        if (Volatile.Read(ref _binaryAttrPaths).Contains(relPath))
+        if (_explicitBinaryPathProvider is null)
+        {
+            Volatile.Write(ref _explicitBinaryLogicalPaths, new HashSet<string>(StringComparer.Ordinal));
+            return;
+        }
+
+        try
+        {
+            var set = await _explicitBinaryPathProvider
+                .GetExplicitBinaryLogicalPathsAsync(files, cancellationToken)
+                .ConfigureAwait(false);
+            Volatile.Write(ref _explicitBinaryLogicalPaths, set);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogDebug(ex, "explicit binary-path refresh failed");
+        }
+    }
+
+    private string? SafeGetCurrentRevisionToken(CancellationToken cancellationToken)
+    {
+        try { return _target.GetCurrentRevisionToken(cancellationToken); }
+        catch { return null; }
+    }
+
+    private long GetRootId(TargetRoot root)
+    {
+        if (_rootIds is null)
+            throw new InvalidOperationException("root ids have not been initialized");
+
+        var key = TargetPathUtilities.NormalizeForComparison(root.AbsolutePath);
+        if (_rootIds.TryGetValue(key, out var rootId))
+            return rootId;
+
+        throw new InvalidOperationException($"no root id mapping exists for '{root.AbsolutePath}'");
+    }
+
+    private bool IsBinary(string logicalPath, string absolutePath)
+    {
+        if (Volatile.Read(ref _explicitBinaryLogicalPaths).Contains(logicalPath))
             return true;
-        return _repo.IsLikelyBinary(relPath);
+        return BinaryFileClassifier.IsLikelyBinary(absolutePath);
     }
-
 }

@@ -4,6 +4,7 @@ using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 using Indexed.Core;
+using Indexed.Targets;
 using Xunit;
 
 namespace Indexed.Core.Tests;
@@ -28,6 +29,39 @@ public sealed class SqliteIndexTests : IDisposable
 
     private string DbPath => Path.Combine(_tempDir, "index.db");
 
+    private long UpsertPrimaryRoot(WriterScope scope, string? rootPath = null)
+    {
+        var absoluteRoot = Path.GetFullPath(rootPath ?? _tempDir);
+        var bindings = SqliteIndex.UpsertRoots(
+            scope,
+            new[] { new TargetRoot(Name: null, AbsolutePath: absoluteRoot, IsPrimary: true) });
+        return bindings[TargetPathUtilities.NormalizeForComparison(absoluteRoot)];
+    }
+
+    private long UpsertFileForTest(
+        WriterScope scope,
+        string logicalPath,
+        long mtimeUtc,
+        long sizeBytes,
+        byte[] sha256,
+        string? language,
+        long indexedAt,
+        string textForTokenization)
+    {
+        var rootId = UpsertPrimaryRoot(scope);
+        return SqliteIndex.UpsertFile(
+            scope: scope,
+            rootId: rootId,
+            relativePath: logicalPath,
+            logicalPath: logicalPath,
+            mtimeUtc: mtimeUtc,
+            sizeBytes: sizeBytes,
+            sha256: sha256,
+            language: language,
+            indexedAt: indexedAt,
+            textForTokenization: textForTokenization);
+    }
+
     [Fact]
     public void OpenOrCreate_CreatesSchemaAtCurrentVersion()
     {
@@ -49,9 +83,9 @@ public sealed class SqliteIndexTests : IDisposable
 
         await using (var scope = await index.BeginWriteAsync())
         {
-            SqliteIndex.UpsertFile(
+            UpsertFileForTest(
                 scope: scope,
-                path: "src/foo.cs",
+                logicalPath: "src/foo.cs",
                 mtimeUtc: 1,
                 sizeBytes: 10,
                 sha256: sha,
@@ -65,7 +99,7 @@ public sealed class SqliteIndexTests : IDisposable
 
         var rows = await index.GetFilesAsync(candidates, default);
         Assert.Single(rows);
-        Assert.Equal("src/foo.cs", rows[0].Path);
+        Assert.Equal("src/foo.cs", rows[0].LogicalPath);
         Assert.Equal(sha, rows[0].Sha256);
     }
 
@@ -79,7 +113,7 @@ public sealed class SqliteIndexTests : IDisposable
             index.SetMeta(SqliteSchema.MetaKey_SchemaVersion, "0");
 
             await using var scope = await index.BeginWriteAsync();
-            SqliteIndex.UpsertFile(scope, "old.cs", 1, 1, new byte[32], "csharp", 1, "stale content");
+            UpsertFileForTest(scope, "old.cs", 1, 1, new byte[32], "csharp", 1, "stale content");
         }
 
         // Reopening must notice the mismatch, wipe the DB, and start fresh.
@@ -108,7 +142,7 @@ public sealed class SqliteIndexTests : IDisposable
         long fileId;
         await using (var scope = await index.BeginWriteAsync())
         {
-            fileId = SqliteIndex.UpsertFile(
+            fileId = UpsertFileForTest(
                 scope, "a.cs", 1, 1, new byte[32], "csharp", 1, "zeta");
         }
 
@@ -130,11 +164,11 @@ public sealed class SqliteIndexTests : IDisposable
 
         await using (var scope = await index.BeginWriteAsync())
         {
-            SqliteIndex.UpsertFile(scope, "a.cs", 1, 10, sha1, "csharp", 1, "alpha");
-            SqliteIndex.UpsertFile(scope, "b.cs", 1, 10, sha2, "csharp", 1, "beta");
+            UpsertFileForTest(scope, "a.cs", 1, 10, sha1, "csharp", 1, "alpha");
+            UpsertFileForTest(scope, "b.cs", 1, 10, sha2, "csharp", 1, "beta");
         }
 
-        var all = await index.GetAllPathsWithShaAsync(default);
+        var all = await index.GetAllLogicalPathsWithShaAsync(default);
 
         Assert.Equal(2, all.Count);
         Assert.True(all.ContainsKey("a.cs"));
@@ -144,19 +178,19 @@ public sealed class SqliteIndexTests : IDisposable
     }
 
     [Fact]
-    public async Task LookupFileIdByPath_ReturnsIdOrNull()
+    public async Task LookupFileIdByLogicalPath_ReturnsIdOrNull()
     {
         await using var index = SqliteIndex.OpenOrCreate(DbPath);
 
         await using (var scope = await index.BeginWriteAsync())
         {
-            SqliteIndex.UpsertFile(scope, "found.cs", 1, 1, new byte[32], "csharp", 1, "x");
+            UpsertFileForTest(scope, "found.cs", 1, 1, new byte[32], "csharp", 1, "x");
         }
 
-        var found = index.LookupFileIdByPath("found.cs");
+        var found = index.LookupFileIdByLogicalPath("found.cs");
         Assert.NotNull(found);
 
-        var missing = index.LookupFileIdByPath("missing.cs");
+        var missing = index.LookupFileIdByLogicalPath("missing.cs");
         Assert.Null(missing);
     }
 
@@ -168,9 +202,9 @@ public sealed class SqliteIndexTests : IDisposable
         long id1, id2;
         await using (var scope = await index.BeginWriteAsync())
         {
-            id1 = SqliteIndex.UpsertFile(scope, "x.cs", 1, 1, new byte[32], "csharp", 1, "aaa");
+            id1 = UpsertFileForTest(scope, "x.cs", 1, 1, new byte[32], "csharp", 1, "aaa");
             var sha2 = new byte[32]; sha2[0] = 1;
-            id2 = SqliteIndex.UpsertFile(scope, "y.cs", 1, 1, sha2, "csharp", 1, "bbb");
+            id2 = UpsertFileForTest(scope, "y.cs", 1, 1, sha2, "csharp", 1, "bbb");
         }
 
         Assert.Equal(2L, index.GetFileCount());
@@ -233,7 +267,7 @@ public sealed class SqliteIndexTests : IDisposable
         await using var index = SqliteIndex.OpenOrCreate(DbPath);
 
         var scope = await index.BeginWriteAsync();
-        SqliteIndex.UpsertFile(scope, "x.cs", 1, 1, new byte[32], "csharp", 1, "aaa");
+        UpsertFileForTest(scope, "x.cs", 1, 1, new byte[32], "csharp", 1, "aaa");
         await scope.DisposeAsync();
         // Second dispose must be a no-op; in particular it must NOT release
         // the semaphore again.

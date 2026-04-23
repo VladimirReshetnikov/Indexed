@@ -1,28 +1,28 @@
 # Indexed
 
-Background-indexed full-text search service for a local git repository, aimed primarily at AI coding agents that need millisecond-class code search across the working tree.
+Background-indexed full-text search service for a local workspace target, aimed primarily at AI coding agents that need millisecond-class code search across a git repository, a standalone directory tree, or an explicit multi-directory workspace.
 
 - Created (UTC): 2026-04-15T17:00:00Z
 - Repository HEAD: cd463ca87356b067e49fe274a1ebcb6e92376c1d
 
 ## Project goals
 
-- **Warm, millisecond-class code search** for repositories you search repeatedly.
+- **Warm, millisecond-class code search** for workspaces you search repeatedly.
 - **Agent-friendly** JSON and HTTP API on localhost (stable DTOs, explicit freshness).
-- **Eventually-consistent indexing** that keeps up with edits and git HEAD changes.
+- **Eventually-consistent indexing** that keeps up with edits and, for git targets, HEAD changes.
 - **Low operational friction**: auto-start on first use, auto-exit on idle, self-healing rebuilds.
 
 ## Non-goals
 
 - Replacing `rg` for one-off searches or ad-hoc “search everything including vendored/generated blobs” workflows.
 - Code navigation (xref, “go to definition”, semantic symbol search).
-- Cross-repository search in a single query.
+- Cross-target search across unrelated daemon targets in a single query.
 
 ## Tech stack
 
 - **C# / .NET 10** (`net10.0-windows`, nullable enabled, preview language features).
 - **SQLite + FTS5** via `Microsoft.Data.Sqlite` (code index uses the trigram tokenizer).
-- **Incremental indexing** via `FileSystemWatcher` + git HEAD polling + reconciliation.
+- **Incremental indexing** via `FileSystemWatcher` + optional git HEAD polling + reconciliation.
 - **HTTP/JSON daemon** on `127.0.0.1` (service) with a thin CLI client (`idx`).
 - **Serialization** via `System.Text.Json` source generation (`IndexedJsonContext`).
 
@@ -32,8 +32,10 @@ Background-indexed full-text search service for a local git repository, aimed pr
 - **Regex search** with trigram-based narrowing + .NET `Regex` verification.
 - **Path filtering** via gitignore-style globs: `--glob` and `--exclude`.
 - **Index-time exclusion** (`--exclude-index`) plus curated default excludes for lockfiles/minified/generated outputs.
+- **Directory-tree and directory-set targets** via repeated `--root` flags, including continuous background indexing outside git.
 - **Context lines** (`-A`, `-B`, `-C`) without re-running a full scan per query.
-- **Explicit freshness** (`indexedHead`, `currentHead`, `pendingFileCount`, `isStale`) for agents and scripts.
+- **Explicit freshness** (`indexedRevisionToken`, `currentRevisionToken`, `pendingFileCount`, `isStale`) for agents and scripts.
+- **Daemon discovery by target** with `idx daemons` plus target-aware `daemon.json` metadata.
 - **Crash-safe persistence** (SQLite WAL mode) + background compaction (bounded FTS5 merges).
 
 ## Known limitations
@@ -42,6 +44,7 @@ Background-indexed full-text search service for a local git repository, aimed pr
 - **Stage 3 (prose extraction)** is not implemented yet; `--mode prose` returns `NotImplemented`.
 - **File size cap**: files larger than 50 MiB are treated as non-indexable.
 - **Multiline regex** is not supported (matches are line-oriented).
+- **Directory-set queries use a logical-path namespace** (`label/relative/path`) that is stable once chosen; relabeling creates a distinct target.
 - Index footprint can be large for trigram indexing; see the size-reduction docs in `docs/`.
 
 ## Status
@@ -76,6 +79,7 @@ src/Indexed/
         Indexed-Stage4-Incremental-Indexer-Plan.md
     src/
         Indexed.Abstractions/    DTOs: SearchRequest, SearchResponse, Freshness, Match, etc.
+        Indexed.Targets/         target identity, directory targets, logical-path rules
         Indexed.Git/             git.exe wrapper: process runner, repository operations
         Indexed.Core/            SQLite+FTS5 index, query planner, full/incremental indexers
         Indexed.Service/         HTTP daemon host, idle-exit, lifecycle management
@@ -99,8 +103,17 @@ dotnet test
 # Run a search (CLI auto-starts the daemon)
 dotnet run --project src/Indexed.Cli -- find "SearchRequest" --glob "src/**/*.cs"
 
+# Run against a non-git directory tree
+dotnet run --project src/Indexed.Cli -- find "TargetId" --root C:\src\scratch
+
+# Run against an explicit multi-root workspace
+dotnet run --project src/Indexed.Cli -- find "OpenOrCreate" --root core=C:\src\proj\src --root docs=C:\src\proj\docs
+
 # Check daemon status
 dotnet run --project src/Indexed.Cli -- status
+
+# List discovered daemon descriptors
+dotnet run --project src/Indexed.Cli -- daemons
 
 # Force a reconciliation rescan
 dotnet run --project src/Indexed.Cli -- rescan
@@ -115,7 +128,7 @@ Requires the .NET 10 SDK. All projects target `net10.0-windows`.
 
 From inside this repository, `dotnet run` is the simplest path (see Quick start).
 
-To use Indexed in arbitrary repositories, publish **both** the CLI and the
+To use Indexed in arbitrary repositories or directory workspaces, publish **both** the CLI and the
 daemon into the same directory and add it to `PATH`:
 
 ```bash
@@ -134,7 +147,7 @@ you cannot publish side-by-side, set `INDEXED_SERVICE_EXE` to the full path of
 - [Tutorial](docs/Indexed-Tutorial.md) — learning-oriented walkthrough for humans; read this first.
 - [Usage guide](docs/Indexed-Usage-Guide.md) — CLI reference, HTTP API, configuration, data directory layout, troubleshooting.
 - [Architecture](docs/Indexed-Architecture.md) — current-state architecture, layer ownership, data flow, concurrency model, failure handling.
-- [Workspace targets proposal](docs/Indexed-Workspace-Targets-Proposal.md) — draft design for adding non-git single-directory and multi-directory indexing while preserving the current git-repo mode.
+- [Workspace targets proposal](docs/Indexed-Workspace-Targets-Proposal.md) — design record for the target model that now backs git, directory-tree, and directory-set indexing.
 - [Index size reduction strategies](docs/Indexed-Index-Size-Reduction-Strategies.md) — why trigram FTS5 is large and what can be done about it.
 - [Size reduction near-term plan](docs/Indexed-Size-Reduction-SafeNearTerm-Plan.md) — concrete “what to do next” plan for shrinking `index.db` safely.
 - [Architecture proposal](docs/Indexed-Architecture-Proposal.md) — original design document (historical).

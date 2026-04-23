@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using Indexed.Abstractions;
+using Indexed.Targets;
 
 namespace Indexed.Cli;
 
@@ -23,10 +24,12 @@ namespace Indexed.Cli;
 ///                    [--glob &lt;g&gt;] [--exclude &lt;g&gt;]* [--kind &lt;k&gt;]*
 ///                    [--context-before N] [--context-after N] [-C N]
 ///                    [--max-matches N] [--max-matches-per-file N]
-///                    [--json] [--repo-root &lt;dir&gt;] [--idle-timeout-seconds N]
-/// idx status [--repo-root &lt;dir&gt;] [--json] [--idle-timeout-seconds N]
-/// idx rescan [--repo-root &lt;dir&gt;]
-/// idx stop [--repo-root &lt;dir&gt;]
+///                    [--json] [--repo-root &lt;dir&gt;] [--root &lt;dir&gt;|&lt;label=dir&gt;]...
+///                    [--idle-timeout-seconds N]
+/// idx status [--repo-root &lt;dir&gt;|--root &lt;dir&gt;|&lt;label=dir&gt; ...] [--json] [--idle-timeout-seconds N]
+/// idx rescan [--repo-root &lt;dir&gt;|--root &lt;dir&gt;|&lt;label=dir&gt; ...]
+/// idx stop [--repo-root &lt;dir&gt;|--root &lt;dir&gt;|&lt;label=dir&gt; ...]
+/// idx daemons [--json]
 /// idx --help | idx -h
 /// </code>
 /// </remarks>
@@ -44,6 +47,7 @@ public static class ArgumentParser
             "status" => CliCommand.Status,
             "rescan" => CliCommand.Rescan,
             "stop" => CliCommand.Stop,
+            "daemons" => CliCommand.Daemons,
             _ => CliCommand.Help,
         };
 
@@ -66,7 +70,9 @@ public static class ArgumentParser
         var maxMatchesPerFile = 20;
         var emitJson = false;
         string? repoRoot = null;
+        List<string>? rootArgs = null;
         int? idleTimeoutSeconds = null;
+        var noDefaultDirectoryExcludes = false;
 
         string? TakeArg(ref int i, string flag)
         {
@@ -135,8 +141,14 @@ public static class ArgumentParser
                     case "--repo-root":
                         repoRoot = TakeArg(ref i, a);
                         break;
+                    case "--root":
+                        (rootArgs ??= new List<string>()).Add(TakeArg(ref i, a)!);
+                        break;
                     case "--idle-timeout-seconds":
                         idleTimeoutSeconds = ParseInt(TakeArg(ref i, a)!, a);
+                        break;
+                    case "--no-default-directory-excludes":
+                        noDefaultDirectoryExcludes = true;
                         break;
                     case "-h":
                     case "--help":
@@ -154,32 +166,62 @@ public static class ArgumentParser
 
             if (verb == CliCommand.Find && string.IsNullOrEmpty(pattern))
                 throw new ArgumentParseException("find requires a <pattern>");
+
+            if (!string.IsNullOrEmpty(repoRoot) && rootArgs is { Count: > 0 })
+                throw new ArgumentParseException("--repo-root and --root are mutually exclusive");
+
+            var roots = NormalizeRoots(rootArgs);
+
+            if (noDefaultDirectoryExcludes && roots is null)
+                throw new ArgumentParseException("--no-default-directory-excludes requires one or more --root arguments");
+
+            ValidateVerbSpecificUsage(
+                verb,
+                pattern,
+                mode,
+                isRegex,
+                caseSensitive,
+                pathGlob,
+                excludeGlob,
+                indexExcludeGlob,
+                noDefaultExcludes,
+                kindFilter,
+                contextBefore,
+                contextAfter,
+                maxMatches,
+                maxMatchesPerFile,
+                repoRoot,
+                roots,
+                idleTimeoutSeconds,
+                noDefaultDirectoryExcludes);
+
+            return new CliArguments
+            {
+                Command = verb,
+                Pattern = pattern,
+                Mode = mode,
+                IsRegex = isRegex,
+                CaseSensitive = caseSensitive,
+                PathGlob = pathGlob,
+                ExcludeGlob = excludeGlob,
+                IndexExcludeGlob = indexExcludeGlob,
+                NoDefaultExcludes = noDefaultExcludes,
+                NoDefaultDirectoryExcludes = noDefaultDirectoryExcludes,
+                KindFilter = kindFilter,
+                ContextBefore = contextBefore,
+                ContextAfter = contextAfter,
+                MaxMatches = maxMatches,
+                MaxMatchesPerFile = maxMatchesPerFile,
+                EmitJson = emitJson,
+                RepoRoot = repoRoot,
+                Roots = roots,
+                IdleTimeoutSeconds = idleTimeoutSeconds,
+            };
         }
         catch (ArgumentParseException ex)
         {
             return new CliArguments { Command = CliCommand.Help, Diagnostic = ex.Message };
         }
-
-        return new CliArguments
-        {
-            Command = verb,
-            Pattern = pattern,
-            Mode = mode,
-            IsRegex = isRegex,
-            CaseSensitive = caseSensitive,
-            PathGlob = pathGlob,
-            ExcludeGlob = excludeGlob,
-            IndexExcludeGlob = indexExcludeGlob,
-            NoDefaultExcludes = noDefaultExcludes,
-            KindFilter = kindFilter,
-            ContextBefore = contextBefore,
-            ContextAfter = contextAfter,
-            MaxMatches = maxMatches,
-            MaxMatchesPerFile = maxMatchesPerFile,
-            EmitJson = emitJson,
-            RepoRoot = repoRoot,
-            IdleTimeoutSeconds = idleTimeoutSeconds,
-        };
     }
 
     private static QueryMode ParseMode(string s) => s switch
@@ -210,6 +252,71 @@ public static class ArgumentParser
         return n;
     }
 
+    private static IReadOnlyList<TargetRootSpec>? NormalizeRoots(List<string>? rootArgs)
+    {
+        if (rootArgs is null || rootArgs.Count == 0)
+            return null;
+
+        try
+        {
+            return TargetRootArgumentParser.NormalizeSelection(rootArgs);
+        }
+        catch (ArgumentParseException)
+        {
+            throw;
+        }
+        catch (ArgumentException ex)
+        {
+            throw new ArgumentParseException(ex.Message);
+        }
+    }
+
+    private static void ValidateVerbSpecificUsage(
+        CliCommand verb,
+        string? pattern,
+        QueryMode mode,
+        bool isRegex,
+        bool caseSensitive,
+        string? pathGlob,
+        IReadOnlyList<string>? excludeGlob,
+        IReadOnlyList<string>? indexExcludeGlob,
+        bool noDefaultExcludes,
+        IReadOnlyList<SpanKind>? kindFilter,
+        int contextBefore,
+        int contextAfter,
+        int maxMatches,
+        int maxMatchesPerFile,
+        string? repoRoot,
+        IReadOnlyList<TargetRootSpec>? roots,
+        int? idleTimeoutSeconds,
+        bool noDefaultDirectoryExcludes)
+    {
+        if (verb != CliCommand.Daemons)
+            return;
+
+        var hasUnsupportedOptions =
+            pattern is not null
+            || mode != QueryMode.Auto
+            || isRegex
+            || caseSensitive
+            || pathGlob is not null
+            || excludeGlob is { Count: > 0 }
+            || indexExcludeGlob is { Count: > 0 }
+            || noDefaultExcludes
+            || noDefaultDirectoryExcludes
+            || kindFilter is { Count: > 0 }
+            || contextBefore != 0
+            || contextAfter != 0
+            || maxMatches != 200
+            || maxMatchesPerFile != 20
+            || repoRoot is not null
+            || roots is { Count: > 0 }
+            || idleTimeoutSeconds is not null;
+
+        if (hasUnsupportedOptions)
+            throw new ArgumentParseException("idx daemons only supports --json");
+    }
+
     /// <summary>
     /// Human-readable usage text. Kept in one place so Help and the
     /// diagnostic path share it.
@@ -220,9 +327,10 @@ public static class ArgumentParser
 
         Usage:
           idx find <pattern> [options]
-          idx status [--json] [--repo-root <dir>]
-          idx rescan [--repo-root <dir>]
-          idx stop [--repo-root <dir>]
+          idx status [--json] [--repo-root <dir>] [--root <dir>|<label=dir>]...
+          idx rescan [--repo-root <dir>] [--root <dir>|<label=dir>]...
+          idx stop [--repo-root <dir>] [--root <dir>|<label=dir>]...
+          idx daemons [--json]
 
         find options:
           --mode <auto|code|prose>      query mode (default: auto)
@@ -240,8 +348,12 @@ public static class ArgumentParser
           --max-matches <n>             global cap (default 200)
           --max-matches-per-file <n>    per-file cap (default 20)
           --json                        emit raw JSON response
-          --repo-root <dir>             override repository root
+          --repo-root <dir>             override repository root (git mode)
+          --root <dir>|<label=dir>      select directory target roots
           --idle-timeout-seconds <n>    daemon idle timeout override (new daemon only)
+          --no-default-directory-excludes
+                                        do not apply directory-mode default excludes
+                                        (.git, node_modules, bin/obj, caches, build outputs)
         """;
 }
 

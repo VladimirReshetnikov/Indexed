@@ -1,4 +1,7 @@
 using System;
+using System.Collections.Generic;
+using System.Text.Json.Serialization;
+using Indexed.Targets;
 
 namespace Indexed.Abstractions;
 
@@ -51,8 +54,12 @@ public sealed record StatusResponse(
     string DaemonVersion,
     int SchemaVersion,
     int Pid,
-    string RepoRoot,
-    string RepoId,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.Never)] string? RepoRoot,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.Never)] string? RepoId,
     DateTimeOffset StartedAt,
     Freshness Freshness,
-    OptimizerStats? Optimizer = null);
+    OptimizerStats? Optimizer = null,
+    TargetKind TargetKind = TargetKind.GitRepository,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.Never)] string? TargetId = null,
+    IReadOnlyList<TargetRoot>? Roots = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.Never)] TargetRoot? PrimaryRoot = null);

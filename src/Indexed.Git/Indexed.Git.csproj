@@ -4,6 +4,9 @@
         <RootNamespace>Indexed.Git</RootNamespace>
     </PropertyGroup>
     <ItemGroup>
+        <ProjectReference Include="../Indexed.Targets/Indexed.Targets.csproj" />
+    </ItemGroup>
+    <ItemGroup>
         <InternalsVisibleTo Include="Indexed.Git.Tests" />
         <InternalsVisibleTo Include="Indexed.Service.Tests" />
     </ItemGroup>

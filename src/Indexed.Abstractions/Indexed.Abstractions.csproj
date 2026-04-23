@@ -4,6 +4,9 @@
         <RootNamespace>Indexed.Abstractions</RootNamespace>
     </PropertyGroup>
     <ItemGroup>
+        <ProjectReference Include="../Indexed.Targets/Indexed.Targets.csproj" />
+    </ItemGroup>
+    <ItemGroup>
         <InternalsVisibleTo Include="Indexed.Abstractions.Tests" />
     </ItemGroup>
 </Project>

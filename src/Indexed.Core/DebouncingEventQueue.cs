@@ -170,11 +170,11 @@ public sealed class DebouncingEventQueue : IDisposable
         switch (evt)
         {
             case FileChanged fc:
-                _pendingPaths[fc.RelativePath] = (fc, DateTimeOffset.UtcNow);
+                _pendingPaths[fc.LogicalPath] = (fc, DateTimeOffset.UtcNow);
                 break;
 
             case FileDeleted fd:
-                _pendingPaths[fd.RelativePath] = (fd, DateTimeOffset.UtcNow);
+                _pendingPaths[fd.LogicalPath] = (fd, DateTimeOffset.UtcNow);
                 break;
 
             case ReconciliationRequested:

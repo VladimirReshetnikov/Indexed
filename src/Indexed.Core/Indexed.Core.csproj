@@ -6,6 +6,7 @@
     <ItemGroup>
         <ProjectReference Include="../Indexed.Abstractions/Indexed.Abstractions.csproj" />
         <ProjectReference Include="../Indexed.Git/Indexed.Git.csproj" />
+        <ProjectReference Include="../Indexed.Targets/Indexed.Targets.csproj" />
     </ItemGroup>
     <ItemGroup>
         <PackageReference Include="Microsoft.Data.Sqlite" Version="9.0.8" />

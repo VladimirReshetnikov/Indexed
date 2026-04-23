@@ -2,6 +2,7 @@ using System;
 using System.IO;
 using System.Threading.Tasks;
 using Indexed.Core;
+using Indexed.Targets;
 using Microsoft.Data.Sqlite;
 using Xunit;
 
@@ -30,6 +31,15 @@ public sealed class SqliteIndexContentlessTests : IDisposable
         try { Directory.Delete(_tempDir, true); } catch { }
     }
 
+    private long UpsertPrimaryRoot(WriterScope scope)
+    {
+        var absoluteRoot = Path.GetFullPath(_tempDir);
+        var bindings = SqliteIndex.UpsertRoots(
+            scope,
+            new[] { new TargetRoot(Name: null, AbsolutePath: absoluteRoot, IsPrimary: true) });
+        return bindings[TargetPathUtilities.NormalizeForComparison(absoluteRoot)];
+    }
+
     [Fact]
     public async Task CodeFts_IsContentless_NoContentShadowTable()
     {
@@ -37,8 +47,9 @@ public sealed class SqliteIndexContentlessTests : IDisposable
         await using (var index = SqliteIndex.OpenOrCreate(_dbPath))
         {
             await using var scope = await index.BeginWriteAsync();
+            var rootId = UpsertPrimaryRoot(scope);
             SqliteIndex.UpsertFile(
-                scope, "foo.cs", 1, 5, new byte[32], "csharp", 1, "alpha");
+                scope, rootId, "foo.cs", "foo.cs", 1, 5, new byte[32], "csharp", 1, "alpha");
         }
 
         // Inspect the catalog through a plain reader connection. FTS5's
@@ -70,8 +81,9 @@ public sealed class SqliteIndexContentlessTests : IDisposable
         long id;
         await using (var scope = await index.BeginWriteAsync())
         {
+            var rootId = UpsertPrimaryRoot(scope);
             id = SqliteIndex.UpsertFile(
-                scope, "foo.cs", 1, 22, new byte[32], "csharp", 1, "public class Alpha { }");
+                scope, rootId, "foo.cs", "foo.cs", 1, 22, new byte[32], "csharp", 1, "public class Alpha { }");
         }
 
         var candidates = await index.QueryCodeCandidatesAsync("\"alp\"", default);
@@ -80,7 +92,7 @@ public sealed class SqliteIndexContentlessTests : IDisposable
 
         var rows = await index.GetFilesAsync(candidates, default);
         var row = Assert.Single(rows);
-        Assert.Equal("foo.cs", row.Path);
+        Assert.Equal("foo.cs", row.LogicalPath);
         // Contentless: no Content column on the projection.
         Assert.Equal(32, row.Sha256.Length);
     }
@@ -94,8 +106,9 @@ public sealed class SqliteIndexContentlessTests : IDisposable
         long id;
         await using (var scope = await index.BeginWriteAsync())
         {
+            var rootId = UpsertPrimaryRoot(scope);
             id = SqliteIndex.UpsertFile(
-                scope, "foo.cs", 1, 5, new byte[32], "csharp", 1, "zetazeta");
+                scope, rootId, "foo.cs", "foo.cs", 1, 5, new byte[32], "csharp", 1, "zetazeta");
         }
 
         // Sanity: MATCH hits before delete.

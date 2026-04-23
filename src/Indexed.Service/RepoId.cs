@@ -1,7 +1,5 @@
 using System;
-using System.IO;
-using System.Security.Cryptography;
-using System.Text;
+using Indexed.Targets;
 
 namespace Indexed.Service;
 
@@ -41,16 +39,6 @@ public static class RepoId
     /// </param>
     public static string Compute(string repoRoot, string firstCommitSha)
     {
-        if (repoRoot is null) throw new ArgumentNullException(nameof(repoRoot));
-        if (firstCommitSha is null) throw new ArgumentNullException(nameof(firstCommitSha));
-
-        var full = Path.GetFullPath(repoRoot);
-        var input = Encoding.UTF8.GetBytes(full + "\0" + firstCommitSha);
-        Span<byte> hash = stackalloc byte[20];
-        SHA1.HashData(input, hash);
-
-        // First 6 bytes = 12 hex characters — enough for ~2^47 distinct
-        // repo/commit pairs before meaningful collision risk.
-        return Convert.ToHexString(hash[..6]).ToLowerInvariant();
+        return LegacyRepoId.Compute(repoRoot, firstCommitSha);
     }
 }

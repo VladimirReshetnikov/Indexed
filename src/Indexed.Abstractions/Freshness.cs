@@ -1,4 +1,5 @@
 using System;
+using System.Text.Json.Serialization;
 
 namespace Indexed.Abstractions;
 
@@ -53,9 +54,13 @@ namespace Indexed.Abstractions;
 /// for programmatic parsing.
 /// </param>
 public sealed record Freshness(
-    string? IndexedHead,
-    string? CurrentHead,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.Never)] string? IndexedHead,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.Never)] string? CurrentHead,
     int PendingFileCount,
     DateTimeOffset? LastFullScanAt,
     bool IsStale,
-    string? Note = null);
+    string? Note = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.Never)] string? IndexedRevisionToken = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.Never)] string? CurrentRevisionToken = null,
+    RevisionKind RevisionKind = RevisionKind.None,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.Never)] DateTimeOffset? LastReconciliationAt = null);

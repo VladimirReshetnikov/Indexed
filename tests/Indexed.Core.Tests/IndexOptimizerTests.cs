@@ -3,6 +3,7 @@ using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
 using Indexed.Core;
+using Indexed.Targets;
 using Microsoft.Data.Sqlite;
 using Xunit;
 
@@ -29,6 +30,15 @@ public sealed class IndexOptimizerTests : IDisposable
     }
 
     private string DbPath => Path.Combine(_tempDir, "index.db");
+
+    private long UpsertPrimaryRoot(WriterScope scope)
+    {
+        var absoluteRoot = Path.GetFullPath(_tempDir);
+        var bindings = SqliteIndex.UpsertRoots(
+            scope,
+            new[] { new TargetRoot(Name: null, AbsolutePath: absoluteRoot, IsPrimary: true) });
+        return bindings[TargetPathUtilities.NormalizeForComparison(absoluteRoot)];
+    }
 
     /// <summary>
     /// Count rows in <c>code_fts_data</c>. Each row is a page of posting list
@@ -64,9 +74,15 @@ public sealed class IndexOptimizerTests : IDisposable
             sha[0] = (byte)(i & 0xFF);
             sha[1] = (byte)((i >> 8) & 0xFF);
             await using var scope = await index.BeginWriteAsync();
+            var rootId = SqliteIndex.UpsertRoots(
+                scope,
+                new[] { new TargetRoot(Name: null, AbsolutePath: Path.GetFullPath(Path.GetDirectoryName(index.DbPath)!), IsPrimary: true) })
+                [TargetPathUtilities.NormalizeForComparison(Path.GetDirectoryName(index.DbPath)!)];
             SqliteIndex.UpsertFile(
                 scope,
-                path: $"src/f{i:D4}.cs",
+                rootId: rootId,
+                relativePath: $"src/f{i:D4}.cs",
+                logicalPath: $"src/f{i:D4}.cs",
                 mtimeUtc: i,
                 sizeBytes: 64,
                 sha256: sha,
@@ -161,8 +177,18 @@ public sealed class IndexOptimizerTests : IDisposable
             {
                 sha[0] = (byte)(i & 0xFF);
                 await using var scope = await index.BeginWriteAsync(cts.Token);
+                var rootId = UpsertPrimaryRoot(scope);
                 SqliteIndex.UpsertFile(
-                    scope, $"p{i:D4}.cs", i, 64, sha, "csharp", i, $"body {i}");
+                    scope,
+                    rootId,
+                    $"p{i:D4}.cs",
+                    $"p{i:D4}.cs",
+                    i,
+                    64,
+                    sha,
+                    "csharp",
+                    i,
+                    $"body {i}");
                 optimizer.NotifyDirty();
             }
         }, cts.Token);

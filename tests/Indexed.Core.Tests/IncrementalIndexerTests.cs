@@ -65,16 +65,26 @@ public sealed class IncrementalIndexerTests : IDisposable
     private static string GetHead(string repo)
         => GitRepository.Open(repo).GetHeadSha();
 
+    private static async Task WaitForAsync(Func<bool> condition, int timeoutMs = 5000)
+    {
+        using var cts = new System.Threading.CancellationTokenSource(timeoutMs);
+        while (!condition())
+        {
+            cts.Token.ThrowIfCancellationRequested();
+            await Task.Delay(50, cts.Token);
+        }
+    }
+
     [Fact]
     public async Task FileChanged_UpsertsNewFile()
     {
         var repoPath = InitRepo(new[] { ("a.cs", "alpha") });
-        var gitRepo = GitRepository.Open(repoPath);
+        var target = GitIndexTarget.Open(repoPath);
         var dbPath = Path.Combine(_tempRoot, "fc.db");
         await using var index = SqliteIndex.OpenOrCreate(dbPath);
 
         // Full scan to seed the index.
-        await new FullScanIndexer(gitRepo, index).RunAsync();
+        await new FullScanIndexer(target, index).RunAsync();
         Assert.Equal(1L, index.GetFileCount());
 
         // Write a new file on disk (but don't git-add).
@@ -86,11 +96,11 @@ public sealed class IncrementalIndexerTests : IDisposable
             perPathDebounce: TimeSpan.FromMilliseconds(5),
             globalBatchWindow: TimeSpan.FromMilliseconds(30));
 
-        await using var indexer = new IncrementalIndexer(gitRepo, index, queue);
+        await using var indexer = new IncrementalIndexer(target, index, queue);
         indexer.Start();
 
         queue.Enqueue(new FileChanged("b.cs"));
-        await Task.Delay(200); // let the worker process the batch
+        await WaitForAsync(() => index.GetFileCount() == 2);
 
         await indexer.DisposeAsync();
 
@@ -103,11 +113,11 @@ public sealed class IncrementalIndexerTests : IDisposable
     public async Task FileDeleted_RemovesFromIndex()
     {
         var repoPath = InitRepo(new[] { ("a.cs", "alpha"), ("b.cs", "beta") });
-        var gitRepo = GitRepository.Open(repoPath);
+        var target = GitIndexTarget.Open(repoPath);
         var dbPath = Path.Combine(_tempRoot, "fd.db");
         await using var index = SqliteIndex.OpenOrCreate(dbPath);
 
-        await new FullScanIndexer(gitRepo, index).RunAsync();
+        await new FullScanIndexer(target, index).RunAsync();
         Assert.Equal(2L, index.GetFileCount());
 
         // Delete b.cs from disk.
@@ -117,11 +127,11 @@ public sealed class IncrementalIndexerTests : IDisposable
             perPathDebounce: TimeSpan.FromMilliseconds(5),
             globalBatchWindow: TimeSpan.FromMilliseconds(30));
 
-        await using var indexer = new IncrementalIndexer(gitRepo, index, queue);
+        await using var indexer = new IncrementalIndexer(target, index, queue);
         indexer.Start();
 
         queue.Enqueue(new FileDeleted("b.cs"));
-        await Task.Delay(200);
+        await WaitForAsync(() => index.GetFileCount() == 1);
 
         await indexer.DisposeAsync();
 
@@ -137,11 +147,11 @@ public sealed class IncrementalIndexerTests : IDisposable
             ("b.cs", "beta"),
             ("c.cs", "gamma"),
         });
-        var gitRepo = GitRepository.Open(repoPath);
+        var target = GitIndexTarget.Open(repoPath);
         var dbPath = Path.Combine(_tempRoot, "hm.db");
         await using var index = SqliteIndex.OpenOrCreate(dbPath);
 
-        await new FullScanIndexer(gitRepo, index).RunAsync();
+        await new FullScanIndexer(target, index).RunAsync();
         var sha1 = GetHead(repoPath);
         Assert.Equal(3L, index.GetFileCount());
 
@@ -157,14 +167,17 @@ public sealed class IncrementalIndexerTests : IDisposable
             perPathDebounce: TimeSpan.FromMilliseconds(5),
             globalBatchWindow: TimeSpan.FromMilliseconds(30));
 
-        await using var indexer = new IncrementalIndexer(gitRepo, index, queue);
+        await using var indexer = new IncrementalIndexer(target, index, queue);
         indexer.Start();
 
         queue.Enqueue(new HeadMoved(sha1, sha2));
 
-        // HeadMoved processing shells out to git diff-tree, then reads and
-        // upserts multiple files + writes indexed_head meta — allow time.
-        await Task.Delay(2000);
+        await WaitForAsync(() =>
+            index.GetFileCount() == 3
+            && index.LookupFileIdByLogicalPath("b.cs") is null
+            && index.LookupFileIdByLogicalPath("d.cs") is not null
+            && index.GetMeta(SqliteSchema.MetaKey_IndexedHead) == sha2,
+            timeoutMs: 8000);
 
         await indexer.DisposeAsync();
 
@@ -176,11 +189,11 @@ public sealed class IncrementalIndexerTests : IDisposable
         Assert.NotEmpty(aCandidates);
 
         // b.cs should be gone.
-        var bId = index.LookupFileIdByPath("b.cs");
+        var bId = index.LookupFileIdByLogicalPath("b.cs");
         Assert.Null(bId);
 
         // d.cs should be present.
-        var dId = index.LookupFileIdByPath("d.cs");
+        var dId = index.LookupFileIdByLogicalPath("d.cs");
         Assert.NotNull(dId);
 
         // indexed_head should be updated.
@@ -191,11 +204,11 @@ public sealed class IncrementalIndexerTests : IDisposable
     public async Task ReconciliationRequested_FixesMissingFiles()
     {
         var repoPath = InitRepo(new[] { ("a.cs", "alpha") });
-        var gitRepo = GitRepository.Open(repoPath);
+        var target = GitIndexTarget.Open(repoPath);
         var dbPath = Path.Combine(_tempRoot, "recon.db");
         await using var index = SqliteIndex.OpenOrCreate(dbPath);
 
-        await new FullScanIndexer(gitRepo, index).RunAsync();
+        await new FullScanIndexer(target, index).RunAsync();
         Assert.Equal(1L, index.GetFileCount());
 
         // Write a new untracked file that the index doesn't know about.
@@ -205,20 +218,18 @@ public sealed class IncrementalIndexerTests : IDisposable
             perPathDebounce: TimeSpan.FromMilliseconds(5),
             globalBatchWindow: TimeSpan.FromMilliseconds(30));
 
-        await using var indexer = new IncrementalIndexer(gitRepo, index, queue);
+        await using var indexer = new IncrementalIndexer(target, index, queue);
         indexer.Start();
 
         queue.Enqueue(new ReconciliationRequested());
 
-        // Reconciliation shells out to git ls-files + enumerates the index,
-        // which can take longer than a simple file upsert.
-        await Task.Delay(2000);
+        await WaitForAsync(() => index.LookupFileIdByLogicalPath("orphan.cs") is not null, timeoutMs: 8000);
 
         await indexer.DisposeAsync();
 
         // orphan.cs should now be in the index.
         Assert.Equal(2L, index.GetFileCount());
-        var orphanId = index.LookupFileIdByPath("orphan.cs");
+        var orphanId = index.LookupFileIdByLogicalPath("orphan.cs");
         Assert.NotNull(orphanId);
     }
 
@@ -226,10 +237,10 @@ public sealed class IncrementalIndexerTests : IDisposable
     public async Task BatchCommitted_EventFires()
     {
         var repoPath = InitRepo(new[] { ("a.cs", "alpha") });
-        var gitRepo = GitRepository.Open(repoPath);
+        var target = GitIndexTarget.Open(repoPath);
         var dbPath = Path.Combine(_tempRoot, "evt.db");
         await using var index = SqliteIndex.OpenOrCreate(dbPath);
-        await new FullScanIndexer(gitRepo, index).RunAsync();
+        await new FullScanIndexer(target, index).RunAsync();
 
         File.WriteAllText(Path.Combine(repoPath, "b.cs"), "beta");
 
@@ -238,12 +249,12 @@ public sealed class IncrementalIndexerTests : IDisposable
             globalBatchWindow: TimeSpan.FromMilliseconds(30));
 
         var committed = false;
-        await using var indexer = new IncrementalIndexer(gitRepo, index, queue);
+        await using var indexer = new IncrementalIndexer(target, index, queue);
         indexer.BatchCommitted += () => committed = true;
         indexer.Start();
 
         queue.Enqueue(new FileChanged("b.cs"));
-        await Task.Delay(200);
+        await WaitForAsync(() => committed);
 
         await indexer.DisposeAsync();
 

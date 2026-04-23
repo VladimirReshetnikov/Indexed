@@ -17,8 +17,18 @@ namespace Indexed.Service;
 /// </remarks>
 public sealed record DaemonOptions
 {
-    /// <summary>Repository working-tree root the daemon will serve.</summary>
-    public required string RepoRoot { get; init; }
+    /// <summary>
+    /// Legacy git-mode compatibility root. When <see cref="TargetSelection"/>
+    /// is absent, the daemon uses this path to open a git target.
+    /// </summary>
+    public string? RepoRoot { get; init; }
+
+    /// <summary>
+    /// Optional target-selection object for directory-tree, directory-set, or
+    /// future non-git modes. When absent, <see cref="RepoRoot"/> is treated as
+    /// the git compatibility path.
+    /// </summary>
+    public TargetSelection? TargetSelection { get; init; }
 
     /// <summary>
     /// Override for the <c>%LOCALAPPDATA%\Indexed</c> parent of the per-repo
@@ -48,7 +58,7 @@ public sealed record DaemonOptions
 
     /// <summary>
     /// Optional backend injection for tests. When <c>null</c>, the host
-    /// opens the per-repo <c>index.db</c>, runs a full scan if empty, and
+    /// opens the per-target <c>index.db</c>, runs a full scan if empty, and
     /// constructs a <see cref="SqliteSearchBackend"/>.
     /// </summary>
     public ISearchBackend? BackendOverride { get; init; }
@@ -63,8 +73,8 @@ public sealed record DaemonOptions
     public bool RunInitialScan { get; init; } = true;
 
     /// <summary>
-    /// Gitignore-style globs applied to repository-relative POSIX paths
-    /// during full-scan indexing. Matching files are skipped before reading.
+    /// Gitignore-style globs applied to logical paths during full-scan
+    /// indexing. Matching files are skipped before reading.
     /// Useful for large vendored trees like <c>lib/**</c> that inflate the
     /// FTS5 trigram index without providing search value.
     /// </summary>
@@ -91,6 +101,12 @@ public sealed record DaemonOptions
     /// </para>
     /// </remarks>
     public bool UseDefaultIndexExcludes { get; init; } = true;
+
+    /// <summary>
+    /// Whether directory-mode default excludes participate in target identity.
+    /// Git mode leaves this disabled.
+    /// </summary>
+    public bool UseDefaultDirectoryExcludes { get; init; }
 
     /// <summary>
     /// Interval between <see cref="Indexed.Core.IndexOptimizer"/> ticks.

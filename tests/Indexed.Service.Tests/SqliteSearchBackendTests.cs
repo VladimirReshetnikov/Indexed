@@ -41,8 +41,8 @@ public sealed class SqliteSearchBackendTests : IDisposable
         var dbPath = Path.Combine(_tempRoot, "index.db");
         _index = SqliteIndex.OpenOrCreate(dbPath);
 
-        var repo = GitRepository.Open(repoPath);
-        var indexer = new FullScanIndexer(repo, _index);
+        var target = GitIndexTarget.Open(repoPath);
+        var indexer = new FullScanIndexer(target, _index);
         indexer.RunAsync(progress: null, CancellationToken.None).GetAwaiter().GetResult();
 
         _backend = new SqliteSearchBackend(

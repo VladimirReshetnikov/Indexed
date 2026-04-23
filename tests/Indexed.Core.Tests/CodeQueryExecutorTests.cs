@@ -4,6 +4,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using Indexed.Abstractions;
 using Indexed.Core;
+using Indexed.Targets;
 using Xunit;
 
 namespace Indexed.Core.Tests;
@@ -34,6 +35,15 @@ public sealed class CodeQueryExecutorTests : IDisposable
         try { Directory.Delete(_tempDir, true); } catch { }
     }
 
+    private long UpsertPrimaryRoot(WriterScope scope)
+    {
+        var absoluteRoot = Path.GetFullPath(_repoRoot);
+        var bindings = SqliteIndex.UpsertRoots(
+            scope,
+            new[] { new TargetRoot(Name: null, AbsolutePath: absoluteRoot, IsPrimary: true) });
+        return bindings[TargetPathUtilities.NormalizeForComparison(absoluteRoot)];
+    }
+
     /// <summary>
     /// Seed both the index and the on-disk working tree with the same content.
     /// The index sees the content via <see cref="SqliteIndex.UpsertFile"/> so
@@ -44,11 +54,14 @@ public sealed class CodeQueryExecutorTests : IDisposable
     {
         var index = SqliteIndex.OpenOrCreate(_dbPath);
         await using var scope = await index.BeginWriteAsync();
+        var rootId = UpsertPrimaryRoot(scope);
         foreach (var (path, content) in files)
         {
             SqliteIndex.UpsertFile(
                 scope: scope,
-                path: path,
+                rootId: rootId,
+                relativePath: path,
+                logicalPath: path,
                 mtimeUtc: 1,
                 sizeBytes: content.Length,
                 sha256: new byte[32],

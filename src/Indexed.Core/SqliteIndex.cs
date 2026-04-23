@@ -4,12 +4,13 @@ using System.Data;
 using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
+using Indexed.Targets;
 using Microsoft.Data.Sqlite;
 
 namespace Indexed.Core;
 
 /// <summary>
-/// Per-repository SQLite+FTS5 index wrapper. Owns one writer connection and
+/// Per-target SQLite+FTS5 index wrapper. Owns one writer connection and
 /// a small pool of reader connections; all DDL, migrations, and file UPSERTs
 /// go through the writer; candidate queries go through readers.
 /// </summary>
@@ -46,7 +47,7 @@ public sealed class SqliteIndex : IAsyncDisposable
     private readonly SemaphoreSlim _readerLock = new(initialCount: 1, maxCount: 1);
 
     // Dedicated reader connection for synchronous read methods (GetMeta,
-    // GetFileCount, TryGetShaByPath, LookupFileIdByPath). These methods are
+    // GetFileCount, TryGetShaByLogicalPath, LookupFileIdByLogicalPath). These methods are
     // called from HTTP request threads, timer callbacks, and the indexer
     // worker — potentially concurrently with an open WriterScope. A separate
     // reader connection avoids racing commands on the writer connection.
@@ -263,6 +264,90 @@ public sealed class SqliteIndex : IAsyncDisposable
         cmd.ExecuteNonQuery();
     }
 
+    /// <summary>
+    /// Upsert the target roots used by the current daemon instance and return
+    /// their assigned <c>root_id</c>s keyed by absolute path.
+    /// </summary>
+    /// <remarks>
+    /// The index DB path is already namespaced by <c>targetId</c>, so callers
+    /// are expected to upsert the same logical root set on every start. This
+    /// method therefore updates existing rows in place and does not attempt to
+    /// prune "stale" roots that would require cascading deletes through
+    /// <c>files</c>.
+    /// </remarks>
+    public static IReadOnlyDictionary<string, long> UpsertRoots(
+        WriterScope scope,
+        IReadOnlyList<TargetRoot> roots)
+    {
+        if (scope is null) throw new ArgumentNullException(nameof(scope));
+        if (roots is null) throw new ArgumentNullException(nameof(roots));
+        if (roots.Count == 0) throw new ArgumentException("at least one root is required", nameof(roots));
+
+        var conn = scope.Connection;
+        foreach (var root in roots)
+        {
+            using var cmd = conn.CreateCommand();
+            cmd.Transaction = scope.Transaction;
+            cmd.CommandText = """
+                INSERT INTO roots(root_name, absolute_path, is_primary)
+                VALUES($name, $path, $primary)
+                ON CONFLICT(absolute_path) DO UPDATE SET
+                    root_name = excluded.root_name,
+                    is_primary = excluded.is_primary;
+                """;
+            cmd.Parameters.AddWithValue("$name", (object?)root.Name ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("$path", TargetPathUtilities.NormalizeDirectoryPath(root.AbsolutePath));
+            cmd.Parameters.AddWithValue("$primary", root.IsPrimary ? 1 : 0);
+            cmd.ExecuteNonQuery();
+        }
+
+        var bindings = new Dictionary<string, long>(roots.Count, StringComparer.Ordinal);
+        foreach (var root in roots)
+        {
+            using var cmd = conn.CreateCommand();
+            cmd.Transaction = scope.Transaction;
+            cmd.CommandText = "SELECT root_id FROM roots WHERE absolute_path = $path;";
+            cmd.Parameters.AddWithValue("$path", TargetPathUtilities.NormalizeDirectoryPath(root.AbsolutePath));
+            var result = cmd.ExecuteScalar();
+            if (result is null)
+            {
+                throw new InvalidOperationException(
+                    $"root '{root.AbsolutePath}' was just upserted but could not be read back");
+            }
+
+            bindings[NormalizeRootLookupKey(root.AbsolutePath)] = Convert.ToInt64(result);
+        }
+
+        return bindings;
+    }
+
+    /// <summary>
+    /// Read back the persisted roots in deterministic order.
+    /// </summary>
+    public async ValueTask<IReadOnlyList<TargetRoot>> GetRootsAsync(CancellationToken cancellationToken)
+    {
+        ThrowIfDisposed();
+        await using var lease = await RentReaderAsync(cancellationToken).ConfigureAwait(false);
+        using var cmd = lease.Connection.CreateCommand();
+        cmd.CommandText = """
+            SELECT root_name, absolute_path, is_primary
+            FROM roots
+            ORDER BY is_primary DESC, COALESCE(root_name, ''), absolute_path;
+            """;
+
+        var roots = new List<TargetRoot>();
+        using var reader = await cmd.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            roots.Add(new TargetRoot(
+                Name: reader.IsDBNull(0) ? null : reader.GetString(0),
+                AbsolutePath: reader.GetString(1),
+                IsPrimary: reader.GetInt64(2) != 0));
+        }
+
+        return roots;
+    }
+
     /// <summary>Total number of rows in <c>files</c>.</summary>
     /// <remarks>Thread-safe: uses the dedicated sync reader connection.</remarks>
     public long GetFileCount()
@@ -386,12 +471,14 @@ public sealed class SqliteIndex : IAsyncDisposable
     }
 
     /// <summary>
-    /// Upsert the file row keyed by <paramref name="path"/> and replace the
+    /// Upsert the file row keyed by <paramref name="logicalPath"/> and replace the
     /// corresponding <c>code_fts</c> posting list. Returns the assigned
     /// <c>file_id</c>.
     /// </summary>
     /// <param name="scope">Open writer scope. Required.</param>
-    /// <param name="path">Repository-relative POSIX path.</param>
+    /// <param name="rootId">Owning target root id from the <c>roots</c> table.</param>
+    /// <param name="relativePath">Path relative to the owning root, POSIX separators.</param>
+    /// <param name="logicalPath">Logical path exposed to search clients.</param>
     /// <param name="mtimeUtc">Stat'd mtime, seconds since Unix epoch, UTC.</param>
     /// <param name="sizeBytes">File length in bytes at index time.</param>
     /// <param name="sha256">Raw 32-byte content hash.</param>
@@ -408,7 +495,9 @@ public sealed class SqliteIndex : IAsyncDisposable
     /// </param>
     public static long UpsertFile(
         WriterScope scope,
-        string path,
+        long rootId,
+        string relativePath,
+        string logicalPath,
         long mtimeUtc,
         long sizeBytes,
         ReadOnlySpan<byte> sha256,
@@ -424,9 +513,11 @@ public sealed class SqliteIndex : IAsyncDisposable
         {
             cmd.Transaction = scope.Transaction;
             cmd.CommandText = """
-                INSERT INTO files(path, mtime_utc, size_bytes, sha256, language, indexed_at)
-                VALUES($path, $mtime, $size, $sha, $lang, $at)
-                ON CONFLICT(path) DO UPDATE SET
+                INSERT INTO files(root_id, relative_path, logical_path, mtime_utc, size_bytes, sha256, language, indexed_at)
+                VALUES($rootId, $relativePath, $logicalPath, $mtime, $size, $sha, $lang, $at)
+                ON CONFLICT(logical_path) DO UPDATE SET
+                    root_id = excluded.root_id,
+                    relative_path = excluded.relative_path,
                     mtime_utc = excluded.mtime_utc,
                     size_bytes = excluded.size_bytes,
                     sha256 = excluded.sha256,
@@ -434,7 +525,9 @@ public sealed class SqliteIndex : IAsyncDisposable
                     indexed_at = excluded.indexed_at
                 RETURNING file_id;
                 """;
-            cmd.Parameters.AddWithValue("$path", path);
+            cmd.Parameters.AddWithValue("$rootId", rootId);
+            cmd.Parameters.AddWithValue("$relativePath", relativePath);
+            cmd.Parameters.AddWithValue("$logicalPath", logicalPath);
             cmd.Parameters.AddWithValue("$mtime", mtimeUtc);
             cmd.Parameters.AddWithValue("$size", sizeBytes);
             cmd.Parameters.Add("$sha", SqliteType.Blob).Value = sha256.ToArray();
@@ -468,18 +561,18 @@ public sealed class SqliteIndex : IAsyncDisposable
     }
 
     /// <summary>
-    /// Look up the <c>sha256</c> currently recorded for <paramref name="path"/>.
+    /// Look up the <c>sha256</c> currently recorded for <paramref name="logicalPath"/>.
     /// Returns an empty array when absent.
     /// </summary>
     /// <remarks>Thread-safe: uses the dedicated sync reader connection.</remarks>
-    public byte[] TryGetShaByPath(string path)
+    public byte[] TryGetShaByLogicalPath(string logicalPath)
     {
         ThrowIfDisposed();
         lock (_syncReaderGate)
         {
             using var cmd = _syncReader.CreateCommand();
-            cmd.CommandText = "SELECT sha256 FROM files WHERE path = $p;";
-            cmd.Parameters.AddWithValue("$p", path);
+            cmd.CommandText = "SELECT sha256 FROM files WHERE logical_path = $p;";
+            cmd.Parameters.AddWithValue("$p", logicalPath);
             var result = cmd.ExecuteScalar();
             return result is byte[] bytes ? bytes : Array.Empty<byte>();
         }
@@ -516,12 +609,12 @@ public sealed class SqliteIndex : IAsyncDisposable
     }
 
     /// <summary>
-    /// Fetch <c>(file_id, path, sha256)</c> rows for the given
+    /// Fetch <c>(file_id, logical_path, sha256)</c> rows for the given
     /// <paramref name="fileIds"/>. Order matches <paramref name="fileIds"/>.
     /// </summary>
     /// <remarks>
     /// <para>
-    /// As of schema version 2 this method does not return file content —
+    /// As of schema version 3 this method does not return file content —
     /// <see cref="FileRow"/> carries only the identity/path/hash tuple.
     /// Callers that need content (e.g. <see cref="CodeQueryExecutor"/>)
     /// read it from the working tree via <see cref="FileContentProvider"/>.
@@ -553,15 +646,15 @@ public sealed class SqliteIndex : IAsyncDisposable
                 cmd.Parameters.AddWithValue(parms[i], fileIds[offset + i]);
             }
             cmd.CommandText =
-                $"SELECT file_id, path, sha256 FROM files WHERE file_id IN ({string.Join(',', parms)});";
+                $"SELECT file_id, logical_path, sha256 FROM files WHERE file_id IN ({string.Join(',', parms)});";
 
             using var reader = await cmd.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
             while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
             {
                 var id = reader.GetInt64(0);
-                var path = reader.GetString(1);
+                var logicalPath = reader.GetString(1);
                 var sha = reader.IsDBNull(2) ? Array.Empty<byte>() : (byte[])reader[2];
-                rows[id] = new FileRow(id, path, sha);
+                rows[id] = new FileRow(id, logicalPath, sha);
             }
         }
 
@@ -574,24 +667,24 @@ public sealed class SqliteIndex : IAsyncDisposable
     }
 
     /// <summary>
-    /// Return every <c>(path, sha256)</c> pair from the <c>files</c> table in
+    /// Return every <c>(logical_path, sha256)</c> pair from the <c>files</c> table in
     /// a single query. Used by the reconciliation pass to diff the index
     /// contents against git's file set without N individual round-trips.
     /// </summary>
-    public async ValueTask<IReadOnlyDictionary<string, byte[]>> GetAllPathsWithShaAsync(
+    public async ValueTask<IReadOnlyDictionary<string, byte[]>> GetAllLogicalPathsWithShaAsync(
         CancellationToken cancellationToken)
     {
         ThrowIfDisposed();
         await using var lease = await RentReaderAsync(cancellationToken).ConfigureAwait(false);
         using var cmd = lease.Connection.CreateCommand();
-        cmd.CommandText = "SELECT path, sha256 FROM files ORDER BY path;";
+        cmd.CommandText = "SELECT logical_path, sha256 FROM files ORDER BY logical_path;";
         var dict = new Dictionary<string, byte[]>(StringComparer.Ordinal);
         using var reader = await cmd.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
         while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
         {
-            var path = reader.GetString(0);
+            var logicalPath = reader.GetString(0);
             var sha = reader.IsDBNull(1) ? Array.Empty<byte>() : (byte[])reader[1];
-            dict[path] = sha;
+            dict[logicalPath] = sha;
         }
         return dict;
     }
@@ -606,33 +699,33 @@ public sealed class SqliteIndex : IAsyncDisposable
     public readonly record struct IndexedFileStat(long MtimeUtc, long SizeBytes);
 
     /// <summary>
-    /// Return every <c>(path, mtimeUtc, sizeBytes)</c> triple from the
+    /// Return every <c>(logical_path, mtimeUtc, sizeBytes)</c> triple from the
     /// <c>files</c> table. Callers compare against disk stats to spot
     /// modifications the filesystem watcher silently dropped (buffer
     /// overflows, network drives, editors that rename-in-place while the
     /// watcher is being re-armed, etc.).
     /// </summary>
-    public async ValueTask<IReadOnlyDictionary<string, IndexedFileStat>> GetAllPathsWithStatAsync(
+    public async ValueTask<IReadOnlyDictionary<string, IndexedFileStat>> GetAllLogicalPathsWithStatAsync(
         CancellationToken cancellationToken)
     {
         ThrowIfDisposed();
         await using var lease = await RentReaderAsync(cancellationToken).ConfigureAwait(false);
         using var cmd = lease.Connection.CreateCommand();
-        cmd.CommandText = "SELECT path, mtime_utc, size_bytes FROM files ORDER BY path;";
+        cmd.CommandText = "SELECT logical_path, mtime_utc, size_bytes FROM files ORDER BY logical_path;";
         var dict = new Dictionary<string, IndexedFileStat>(StringComparer.Ordinal);
         using var reader = await cmd.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
         while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
         {
-            var path = reader.GetString(0);
+            var logicalPath = reader.GetString(0);
             var mtime = reader.GetInt64(1);
             var size = reader.GetInt64(2);
-            dict[path] = new IndexedFileStat(mtime, size);
+            dict[logicalPath] = new IndexedFileStat(mtime, size);
         }
         return dict;
     }
 
     /// <summary>
-    /// Return the <c>file_id</c> for the given <paramref name="path"/>, or
+    /// Return the <c>file_id</c> for the given <paramref name="logicalPath"/>, or
     /// <c>null</c> when no such file is indexed.
     /// </summary>
     /// <remarks>
@@ -644,14 +737,14 @@ public sealed class SqliteIndex : IAsyncDisposable
     /// deletes, so the lookup is always against committed state.
     /// </para>
     /// </remarks>
-    public long? LookupFileIdByPath(string path)
+    public long? LookupFileIdByLogicalPath(string logicalPath)
     {
         ThrowIfDisposed();
         lock (_syncReaderGate)
         {
             using var cmd = _syncReader.CreateCommand();
-            cmd.CommandText = "SELECT file_id FROM files WHERE path = $p;";
-            cmd.Parameters.AddWithValue("$p", path);
+            cmd.CommandText = "SELECT file_id FROM files WHERE logical_path = $p;";
+            cmd.Parameters.AddWithValue("$p", logicalPath);
             var result = cmd.ExecuteScalar();
             return result is long id ? id : null;
         }
@@ -711,14 +804,14 @@ public sealed class SqliteIndex : IAsyncDisposable
         }
     }
 
-    /// <summary>Enumerate every <c>(file_id, path)</c> in stable order.</summary>
-    public async ValueTask<IReadOnlyList<(long FileId, string Path)>> ListFilesAsync(
+    /// <summary>Enumerate every <c>(file_id, logical_path)</c> in stable order.</summary>
+    public async ValueTask<IReadOnlyList<(long FileId, string LogicalPath)>> ListFilesAsync(
         CancellationToken cancellationToken)
     {
         ThrowIfDisposed();
         await using var lease = await RentReaderAsync(cancellationToken).ConfigureAwait(false);
         using var cmd = lease.Connection.CreateCommand();
-        cmd.CommandText = "SELECT file_id, path FROM files ORDER BY path;";
+        cmd.CommandText = "SELECT file_id, logical_path FROM files ORDER BY logical_path;";
         var list = new List<(long, string)>();
         using var reader = await cmd.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
         while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
@@ -946,6 +1039,7 @@ public sealed class SqliteIndex : IAsyncDisposable
             PRAGMA page_size=8192;
             PRAGMA journal_mode=WAL;
             PRAGMA synchronous=NORMAL;
+            PRAGMA foreign_keys=ON;
             PRAGMA temp_store=MEMORY;
             PRAGMA mmap_size=268435456;
             """;
@@ -1003,20 +1097,23 @@ public sealed class SqliteIndex : IAsyncDisposable
             try { if (File.Exists(p)) File.Delete(p); } catch { /* best-effort */ }
         }
     }
+
+    private static string NormalizeRootLookupKey(string absolutePath)
+        => TargetPathUtilities.NormalizeForComparison(absolutePath);
 }
 
 /// <summary>
 /// Row projection returned by <see cref="SqliteIndex.GetFilesAsync"/>. Under
-/// schema version 2 the FTS5 index is contentless; callers must read file
-/// text from the working tree at query time via
+/// schema version 3 the FTS5 index is still contentless; callers must read
+/// file text from the working tree at query time via
 /// <see cref="FileContentProvider"/>. The <see cref="Sha256"/> hash is the
 /// at-index-time content hash — consumers can use it to detect staleness
 /// when the on-disk file differs from what was indexed.
 /// </summary>
 /// <param name="FileId">Primary key from the <c>files</c> table.</param>
-/// <param name="Path">Repository-relative POSIX path.</param>
+/// <param name="LogicalPath">Logical path exposed to the search/query layer.</param>
 /// <param name="Sha256">At-index-time SHA-256 of the file content.</param>
-public sealed record FileRow(long FileId, string Path, byte[] Sha256);
+public sealed record FileRow(long FileId, string LogicalPath, byte[] Sha256);
 
 /// <summary>
 /// Exclusive writer scope; all work happens on one transaction that commits

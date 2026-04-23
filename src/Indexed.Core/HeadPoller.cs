@@ -1,6 +1,7 @@
 using System;
 using System.Threading;
 using Indexed.Git;
+using Indexed.Targets;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 
@@ -26,7 +27,7 @@ namespace Indexed.Core;
 /// risk (ref packing races, worktree indirection) for marginal savings.
 /// </para>
 /// </remarks>
-public sealed class HeadPoller : IDisposable
+public sealed class HeadPoller : IRevisionTracker
 {
     private readonly GitRepository _repo;
     private readonly SqliteIndex _index;
@@ -56,6 +57,8 @@ public sealed class HeadPoller : IDisposable
     /// </remarks>
     public string? LastKnownHead => Volatile.Read(ref _lastKnownHead);
 
+    public string? LastKnownRevisionToken => LastKnownHead;
+
     /// <summary>
     /// Create a poller.
     /// </summary>
@@ -83,9 +86,11 @@ public sealed class HeadPoller : IDisposable
     {
         if (_timer is not null) return;
 
-        // Seed the last-known HEAD from the index meta so we detect drift
-        // immediately on the first tick.
-        Volatile.Write(ref _lastKnownHead, _index.GetMeta(SqliteSchema.MetaKey_IndexedHead));
+        // Seed from indexed_head when present; otherwise fall back to the
+        // current HEAD so a cold start that runs a full scan does not
+        // immediately enqueue a bogus HeadMoved(null -> HEAD) before the
+        // full scan has a chance to write indexed_head.
+        Volatile.Write(ref _lastKnownHead, GetInitialKnownHead());
 
         _timer = new Timer(OnTick, null, _interval, _interval);
         _logger.LogDebug("HeadPoller started, interval={Interval}ms", _interval.TotalMilliseconds);
@@ -113,7 +118,7 @@ public sealed class HeadPoller : IDisposable
     internal void PollOnce()
     {
         if (Volatile.Read(ref _lastKnownHead) is null)
-            Volatile.Write(ref _lastKnownHead, _index.GetMeta(SqliteSchema.MetaKey_IndexedHead));
+            Volatile.Write(ref _lastKnownHead, GetInitialKnownHead());
         OnTick(state: null);
     }
 
@@ -164,6 +169,23 @@ public sealed class HeadPoller : IDisposable
             {
                 _logger.LogWarning(ex, "HeadPoller tick error (consecutive: {Count})", _consecutiveErrors);
             }
+        }
+    }
+
+    private string? GetInitialKnownHead()
+    {
+        var indexedHead = _index.GetMeta(SqliteSchema.MetaKey_IndexedHead);
+        if (!string.IsNullOrEmpty(indexedHead))
+            return indexedHead;
+
+        try
+        {
+            var currentHead = _repo.GetHeadSha();
+            return string.IsNullOrEmpty(currentHead) ? null : currentHead;
+        }
+        catch (GitProcessException)
+        {
+            return null;
         }
     }
 }

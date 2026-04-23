@@ -3,6 +3,7 @@ using System.IO;
 using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Indexed.Targets;
 
 namespace Indexed.Service;
 
@@ -27,8 +28,12 @@ namespace Indexed.Service;
 /// </remarks>
 /// <param name="Port">TCP port the daemon is listening on (loopback only).</param>
 /// <param name="Pid">OS process id of the daemon.</param>
-/// <param name="RepoRoot">Repository working-tree root the daemon serves.</param>
-/// <param name="RepoId">12-character repo id (<see cref="Service.RepoId"/>).</param>
+/// <param name="TargetKind">Kind of the served target.</param>
+/// <param name="TargetId">Deterministic target identity for daemon discovery.</param>
+/// <param name="Roots">Validated roots that belong to the served target.</param>
+/// <param name="PrimaryRoot">Primary root for the target.</param>
+/// <param name="RepoRoot">Repository working-tree root the daemon serves, when applicable.</param>
+/// <param name="RepoId">12-character repo id (<see cref="Service.RepoId"/>), when applicable.</param>
 /// <param name="StartedAt">UTC time the daemon began listening.</param>
 /// <param name="DaemonVersion">Informational version string.</param>
 /// <param name="ShutdownToken">
@@ -38,8 +43,12 @@ namespace Indexed.Service;
 public sealed record DaemonInfo(
     int Port,
     int Pid,
-    string RepoRoot,
-    string RepoId,
+    TargetKind TargetKind,
+    string TargetId,
+    IReadOnlyList<TargetRoot> Roots,
+    TargetRoot PrimaryRoot,
+    string? RepoRoot,
+    string? RepoId,
     DateTimeOffset StartedAt,
     string DaemonVersion,
     string ShutdownToken)

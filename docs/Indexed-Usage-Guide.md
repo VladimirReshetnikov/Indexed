@@ -18,7 +18,7 @@ The daemon starts automatically on first CLI use and shuts down after 30 minutes
 - **.NET 10**:
   - To **run** a published `idx.exe`, install the .NET 10 runtime.
   - To **build from source**, install the .NET 10 SDK.
-- **Git**: `git.exe` must be on `PATH` for repository discovery and enumeration.
+- **Git (git mode only)**: `git.exe` must be on `PATH` when the selected target is a git repository. Plain directory targets do not require git.
 
 ## 1.2 Installing / getting `idx` on PATH
 
@@ -45,9 +45,9 @@ dotnet build -c Release
 This works as long as `idx.exe` remains inside the repo checkout: the launcher
 can locate `Indexed.Service.exe` by walking the build tree.
 
-### Option C: Publish for use in other repositories
+### Option C: Publish for use in other repositories and workspaces
 
-To use Indexed in arbitrary repositories (not just inside this checkout),
+To use Indexed in arbitrary repositories or explicit directory workspaces (not just inside this checkout),
 publish **both** the CLI and the daemon into the same directory and add it to
 `PATH`:
 
@@ -58,7 +58,7 @@ dotnet publish src/Indexed.Cli -c Release -o $dest
 dotnet publish src/Indexed.Service -c Release -o $dest
 ```
 
-Now `idx` can be invoked from any git repo, and it will discover and launch the
+Now `idx` can be invoked from any git repo or explicit directory workspace, and it will discover and launch the
 side-by-side `Indexed.Service.exe` as needed.
 
 ## 1.3 Daemon executable discovery (`Indexed.Service.exe`)
@@ -80,9 +80,10 @@ executables side-by-side (Option C above).
 
 ```
 idx find <pattern> [options]
-idx status [--json] [--repo-root <dir>]
-idx rescan [--repo-root <dir>]
-idx stop [--repo-root <dir>]
+idx status [--json] [--repo-root <dir>] [--root <dir>|<label=dir>]...
+idx rescan [--repo-root <dir>] [--root <dir>|<label=dir>]...
+idx stop [--repo-root <dir>] [--root <dir>|<label=dir>]...
+idx daemons [--json]
 idx --help
 ```
 
@@ -94,11 +95,19 @@ invocation launches a new daemon; if an existing daemon is adopted via
 
 - `--exclude-index <glob>` (repeatable)
 - `--no-default-excludes`
+- `--no-default-directory-excludes` (directory targets only)
 - `--idle-timeout-seconds <n>`
+
+**Target selection rules:**
+
+- No `--root` flags: preserve current git-mode behavior (discover the enclosing repository, or use `--repo-root`).
+- One `--root <dir>`: serve a `directory-tree` target rooted at that directory.
+- Two or more `--root <label=dir>` flags: serve a `directory-set` target with logical paths in the form `label/relative/path`.
+- `--repo-root` and `--root` are mutually exclusive.
 
 ### 2.2 `idx find`
 
-Search the indexed repository for a pattern.
+Search the indexed target for a pattern.
 
 ```
 idx find <pattern> [--mode auto|code|prose]
@@ -116,6 +125,8 @@ idx find <pattern> [--mode auto|code|prose]
                    [--max-matches-per-file <n>]
                    [--json]
                    [--repo-root <dir>]
+                   [--root <dir>|<label=dir>]...
+                   [--no-default-directory-excludes]
 ```
 
 **Options:**
@@ -136,8 +147,10 @@ idx find <pattern> [--mode auto|code|prose]
 | `--max-matches` | 200 | Global maximum number of matches returned. Hard cap: 10,000. |
 | `--max-matches-per-file` | 20 | Maximum matches per file. |
 | `--json` | off | Emit raw JSON `SearchResponse` instead of text output. |
-| `--repo-root` | cwd | Override repository root detection. |
+| `--repo-root` | cwd | Override repository root detection (git mode only). |
+| `--root` | none | Select a directory target. One bare path creates a `directory-tree`; repeated `LABEL=PATH` forms create a `directory-set`. |
 | `--idle-timeout-seconds` | (daemon default) | Override daemon idle-exit window (seconds). Applies only when this invocation launches a new daemon. |
+| `--no-default-directory-excludes` | off | Directory targets only. Do not apply the built-in directory-mode exclude list (`.git`, `node_modules`, `bin/obj`, caches, build outputs, etc.). |
 
 **Examples:**
 
@@ -156,6 +169,12 @@ idx find "Dispose" -C 3
 
 # JSON output for agent consumption
 idx find "BuildFreshness" --json
+
+# Search a non-git directory tree
+idx find "TargetId" --root C:\src\scratch
+
+# Search a multi-root workspace
+idx find "OpenOrCreate" --root core=C:\src\proj\src --root docs=C:\src\proj\docs
 
 # Search excluding test files
 idx find "RunAsync" --exclude "**/tests/**"
@@ -192,15 +211,15 @@ idx status --json
 **Text output:**
 
 ```
-Indexed daemon v0.1.0  pid=12345
-  repo:    C:\Tools2\Tools
-  repoId:  a1b2c3d4e5f6
-  schema:  2
-  started: 2026-04-15T10:00:00Z
-  head:    abc123def456... (indexed: abc123def456...)
-  stale:   no
-  pending: 0 files
-  last scan: 2026-04-15T10:00:12Z
+daemon v0.1.0 pid=12345 schema=3
+target  GitRepository a1b2c3d4e5f6
+root    C:\Tools2\Tools
+repo    C:\Tools2\Tools
+repoId  a1b2c3d4e5f6
+started 2026-04-15T10:00:00.0000000+00:00
+rev     kind=Git current=abc123def456..., indexed=abc123def456...
+stale   False (pending=0)
+recon   2026-04-15T10:05:00.0000000+00:00
 ```
 
 ### 2.4 `idx rescan`
@@ -219,6 +238,17 @@ Gracefully shut down the daemon. The daemon drains in-flight work, checkpoints t
 idx stop
 ```
 
+### 2.6 `idx daemons`
+
+List the daemon descriptors currently discoverable under `%LOCALAPPDATA%\Indexed`.
+
+```bash
+idx daemons
+idx daemons --json
+```
+
+Text output shows target kind, target id, PID, start time, and all roots. The command is read-only: it does not maintain a registry and does not mutate daemon state.
+
 ## 3. HTTP API reference
 
 The daemon listens on `http://127.0.0.1:<port>/` where `<port>` is an OS-assigned ephemeral port written to `daemon.json`.
@@ -232,8 +262,22 @@ Returns daemon health and freshness metadata.
 ```json
 {
   "daemonVersion": "0.1.0",
-  "schemaVersion": 2,
+  "schemaVersion": 3,
   "pid": 12345,
+  "targetKind": "GitRepository",
+  "targetId": "a1b2c3d4e5f6",
+  "roots": [
+    {
+      "name": null,
+      "absolutePath": "C:\\Tools2\\Tools",
+      "isPrimary": true
+    }
+  ],
+  "primaryRoot": {
+    "name": null,
+    "absolutePath": "C:\\Tools2\\Tools",
+    "isPrimary": true
+  },
   "repoRoot": "C:\\Tools2\\Tools",
   "repoId": "a1b2c3d4e5f6",
   "startedAt": "2026-04-15T10:00:00Z",
@@ -242,7 +286,11 @@ Returns daemon health and freshness metadata.
     "currentHead": "abc123def456...",
     "pendingFileCount": 0,
     "lastFullScanAt": "2026-04-15T10:00:12Z",
-    "isStale": false
+    "isStale": false,
+    "indexedRevisionToken": "abc123def456...",
+    "currentRevisionToken": "abc123def456...",
+    "revisionKind": "Git",
+    "lastReconciliationAt": "2026-04-15T10:05:00Z"
   }
 }
 ```
@@ -352,10 +400,14 @@ X-Indexed-Shutdown-Token: <base64-encoded-token-from-daemon.json>
 
 ### 4.1 Daemon discovery
 
-1. Compute the repo ID: `SHA1(abspath(repoRoot) + "\0" + firstCommitSha)[0:12]`.
-2. Read `%LOCALAPPDATA%\Indexed\<repoId>\daemon.json`.
-3. If the file exists, probe `GET /status` on the advertised port.
-4. If the probe succeeds, use the daemon. If it fails or the file is missing, launch the daemon.
+1. Resolve a target selection from CLI arguments:
+   - no `--root`: git repository target;
+   - one `--root <dir>`: directory-tree target;
+   - repeated `--root <label=dir>`: directory-set target.
+2. Compute the target ID from the canonical target spec.
+3. Read `%LOCALAPPDATA%\Indexed\<targetId>\daemon.json`.
+4. If the file exists, probe `GET /status` on the advertised port.
+5. If the probe succeeds, use the daemon. If it fails or the file is missing, launch the daemon.
 
 The `idx` CLI handles this automatically. Agents that use the HTTP API directly can invoke `DaemonLauncher` or simply run `idx status` to ensure the daemon is up.
 
@@ -388,13 +440,16 @@ The daemon accepts these command-line arguments (via `Indexed.Service` `Program.
 
 | Argument | Default | Description |
 |----------|---------|-------------|
-| `<repo-root>` | (required) | Path to the git repository root |
+| `<repo-root>` | cwd | Legacy positional git-repository root (compatibility form) |
+| `--repo-root` | cwd | Explicit git-repository root |
+| `--root` | (repeatable) | Directory target root selector (`<dir>` or `LABEL=PATH`) |
 | `--idle-timeout-seconds` | 1800 (30 min) | Seconds of inactivity before daemon exits |
 | `--app-data` | `%LOCALAPPDATA%\Indexed` | Base directory for state files |
 | `--exclude-index` | (none) | Glob patterns to exclude from indexing (repeatable) |
 | `--no-default-excludes` | off | Do not apply the built-in default exclude list |
+| `--no-default-directory-excludes` | off | Directory targets only. Disable the directory-mode default excludes |
 
-### 5.2 Built-in default exclude patterns
+### 5.2 Built-in default index exclude patterns
 
 The daemon applies a curated default list of exclude patterns on every full
 scan and incremental update. These patterns target files that inflate the FTS5
@@ -453,11 +508,23 @@ idx find "lockfileVersion"          # subsequent calls use the running daemon
 User-supplied `--exclude-index` globs always compose with (or without) the
 default list — they are not mutually exclusive.
 
+### 5.3 Directory-mode default excludes
+
+Directory targets apply a second built-in list by default to avoid walking obvious low-value or hazardous trees such as:
+
+- VCS metadata: `.git/**`, `.hg/**`, `.svn/**`, `.bzr/**`
+- dependency/install caches: `node_modules/**`, `.venv/**`, `venv/**`, `__pycache__/**`, `.tox/**`, `.pytest_cache/**`, `.mypy_cache/**`
+- build outputs: `bin/**`, `obj/**`, `target/**`, `build/**`, `dist/**`, `out/**`, `.next/**`, `.nuxt/**`, `coverage/**`
+- IDE/tooling state: `.idea/**`, `.vs/**`, `.vscode/**`, `.gradle/**`
+- platform noise: `Thumbs.db`, `.DS_Store`, `$RECYCLE.BIN/**`, `System Volume Information/**`
+
+Disable this list with `--no-default-directory-excludes` when you intentionally want those trees indexed.
+
 ## 6. Data directory layout
 
 ```
 %LOCALAPPDATA%\Indexed\
-    <repoId>/
+    <targetId>/
         daemon.json         # Port, PID, startup time, shutdown token
         index.db            # SQLite database (WAL mode)
         index.db-wal        # WAL file (auto-managed)
@@ -471,6 +538,20 @@ default list — they are not mutually exclusive.
 {
   "port": 54321,
   "pid": 12345,
+  "targetKind": "GitRepository",
+  "targetId": "a1b2c3d4e5f6",
+  "roots": [
+    {
+      "name": null,
+      "absolutePath": "C:\\Tools2\\Tools",
+      "isPrimary": true
+    }
+  ],
+  "primaryRoot": {
+    "name": null,
+    "absolutePath": "C:\\Tools2\\Tools",
+    "isPrimary": true
+  },
   "repoRoot": "C:\\Tools2\\Tools",
   "repoId": "a1b2c3d4e5f6",
   "startedAt": "2026-04-15T10:00:00+00:00",
@@ -483,21 +564,22 @@ Written atomically via temp-file + rename. Deleted on graceful shutdown. A stale
 
 ### 6.2 `index.db` structure
 
-SQLite database in WAL mode. Contains (schema version 2):
+SQLite database in WAL mode. Contains (schema version 3):
 
 | Table | Content |
 |-------|---------|
-| `files` | File metadata: path, mtime, size, SHA-256, language, indexed timestamp |
+| `roots` | Target roots: label, absolute path, primary-root flag |
+| `files` | File metadata keyed by `root_id + relative_path`, with stable `logical_path` returned to the caller |
 | `code_fts` | FTS5 virtual table with trigram tokenizer; **contentless** (`content = ''`, `contentless_delete = 1`). Only the posting list is stored — match snippets are read from the working tree at query time. |
 | `prose_fts` | FTS5 virtual table with porter+unicode61 tokenizer (Stage 3) |
-| `meta` | Key-value metadata: schema version, repo ID, indexed HEAD, last scan time |
+| `meta` | Key-value metadata: schema version, target identity, indexed revision token, scan/reconciliation timestamps |
 
 Inspect with `sqlite3`:
 
 ```bash
-sqlite3 "%LOCALAPPDATA%\Indexed\<repoId>\index.db" "SELECT * FROM meta;"
-sqlite3 "%LOCALAPPDATA%\Indexed\<repoId>\index.db" "SELECT count(*) FROM files;"
-sqlite3 "%LOCALAPPDATA%\Indexed\<repoId>\index.db" "SELECT path FROM files LIMIT 20;"
+sqlite3 "%LOCALAPPDATA%\Indexed\<targetId>\index.db" "SELECT * FROM meta;"
+sqlite3 "%LOCALAPPDATA%\Indexed\<targetId>\index.db" "SELECT count(*) FROM files;"
+sqlite3 "%LOCALAPPDATA%\Indexed\<targetId>\index.db" "SELECT logical_path FROM files LIMIT 20;"
 ```
 
 ### 6.3 Schema upgrades — one-time rebuild
@@ -526,10 +608,10 @@ never interleave with batch commits.
 
 **Checks**:
 1. Can the CLI locate `Indexed.Service.exe`? If not, publish/install side-by-side or set `INDEXED_SERVICE_EXE` (see §1.3).
-2. Is `git` on PATH? The daemon fails fast if `git` is not available.
-3. Is the current directory inside a git repository? Run `git rev-parse --show-toplevel`.
-4. Is another daemon already running? Check `%LOCALAPPDATA%\Indexed\<repoId>\daemon.json` for a stale PID. Kill the process or delete the file.
-5. Check logs at `%LOCALAPPDATA%\Indexed\<repoId>\logs\`.
+2. If you are using git mode, is `git` on PATH? The daemon fails fast only for git-backed targets.
+3. If you are using git mode, is the current directory inside a git repository? Run `git rev-parse --show-toplevel`.
+4. Is another daemon already running? Run `idx daemons` or inspect `%LOCALAPPDATA%\Indexed\<targetId>\daemon.json` for a stale PID. Kill the process or delete the file.
+5. Check logs at `%LOCALAPPDATA%\Indexed\<targetId>\logs\`.
 
 ### Stale results
 
@@ -549,9 +631,9 @@ never interleave with batch commits.
 
 ```bash
 idx stop
-del "%LOCALAPPDATA%\Indexed\<repoId>\index.db"
-del "%LOCALAPPDATA%\Indexed\<repoId>\index.db-wal"
-del "%LOCALAPPDATA%\Indexed\<repoId>\index.db-shm"
+del "%LOCALAPPDATA%\Indexed\<targetId>\index.db"
+del "%LOCALAPPDATA%\Indexed\<targetId>\index.db-wal"
+del "%LOCALAPPDATA%\Indexed\<targetId>\index.db-shm"
 idx status   # restarts daemon and triggers full scan
 ```
 
@@ -596,4 +678,4 @@ Indexed uses gitignore-style glob patterns for `--glob`, `--exclude`, and `--exc
 | `**/tests/**` | Any path containing a `tests/` directory |
 | `*.min.js` | Files ending in `.min.js` |
 
-Patterns match against repo-relative POSIX-style paths (forward slashes). Case-insensitive on Windows.
+Patterns match against logical POSIX-style paths (forward slashes). For git and single-root directory targets this is the root-relative path. For directory-set targets it is `label/relative/path`. Matching is case-insensitive on Windows.

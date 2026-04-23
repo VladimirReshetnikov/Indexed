@@ -77,8 +77,8 @@ public sealed class DaemonHostExcludeDefaultsTests : IDisposable
                 ? ExcludeFilter.Combine(opts.IndexExcludeGlobs, ExcludeFilter.DefaultBinaryAdjacentGlobs)
                 : opts.IndexExcludeGlobs;
 
-            var repo = GitRepository.Open(repoPath);
-            var indexer = new FullScanIndexer(repo, index, effectiveExcludes);
+            var target = GitIndexTarget.Open(repoPath);
+            var indexer = new FullScanIndexer(target, index, effectiveExcludes);
             await indexer.RunAsync(progress: null, CancellationToken.None).ConfigureAwait(false);
         }
         catch
@@ -102,11 +102,11 @@ public sealed class DaemonHostExcludeDefaultsTests : IDisposable
         await using var index = await RunFullScanAsync(repo, useDefaultExcludes: true);
 
         // Normal source file is indexed.
-        var srcId = index.LookupFileIdByPath("src/app.cs");
+        var srcId = index.LookupFileIdByLogicalPath("src/app.cs");
         Assert.NotNull(srcId);
 
         // lockfile is skipped.
-        var lockId = index.LookupFileIdByPath("package-lock.json");
+        var lockId = index.LookupFileIdByLogicalPath("package-lock.json");
         Assert.Null(lockId);
     }
 
@@ -119,8 +119,8 @@ public sealed class DaemonHostExcludeDefaultsTests : IDisposable
 
         await using var index = await RunFullScanAsync(repo, useDefaultExcludes: true);
 
-        Assert.NotNull(index.LookupFileIdByPath("src/main.js"));
-        Assert.Null(index.LookupFileIdByPath("dist/app.min.js"));
+        Assert.NotNull(index.LookupFileIdByLogicalPath("src/main.js"));
+        Assert.Null(index.LookupFileIdByLogicalPath("dist/app.min.js"));
     }
 
     [Fact]
@@ -133,7 +133,7 @@ public sealed class DaemonHostExcludeDefaultsTests : IDisposable
         await using var index = await RunFullScanAsync(repo, useDefaultExcludes: false);
 
         // With opt-out, the lockfile should be indexed.
-        var lockId = index.LookupFileIdByPath("package-lock.json");
+        var lockId = index.LookupFileIdByLogicalPath("package-lock.json");
         Assert.NotNull(lockId);
     }
 
@@ -151,9 +151,9 @@ public sealed class DaemonHostExcludeDefaultsTests : IDisposable
             useDefaultExcludes: true,
             extraExcludes: new[] { "vendor/**" });
 
-        Assert.NotNull(index.LookupFileIdByPath("src/main.cs"));
-        Assert.Null(index.LookupFileIdByPath("package-lock.json"));   // default excluded
-        Assert.Null(index.LookupFileIdByPath("vendor/lib.cs"));        // user excluded
+        Assert.NotNull(index.LookupFileIdByLogicalPath("src/main.cs"));
+        Assert.Null(index.LookupFileIdByLogicalPath("package-lock.json"));   // default excluded
+        Assert.Null(index.LookupFileIdByLogicalPath("vendor/lib.cs"));        // user excluded
     }
 
     [Fact]
@@ -165,7 +165,7 @@ public sealed class DaemonHostExcludeDefaultsTests : IDisposable
 
         await using var index = await RunFullScanAsync(repo, useDefaultExcludes: true);
 
-        Assert.NotNull(index.LookupFileIdByPath("src/Program.cs"));
-        Assert.Null(index.LookupFileIdByPath("src/Generated/Proto.g.cs"));
+        Assert.NotNull(index.LookupFileIdByLogicalPath("src/Program.cs"));
+        Assert.Null(index.LookupFileIdByLogicalPath("src/Generated/Proto.g.cs"));
     }
 }

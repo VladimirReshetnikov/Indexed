@@ -211,7 +211,7 @@ public sealed class JsonContractTests
         var round = JsonSerializer.Deserialize(json, Context.Freshness);
 
         Assert.Equal(fresh, round);
-        Assert.DoesNotContain("\"indexedHead\":", json); // null-ignored
+        Assert.Contains("\"indexedHead\":null", json);
         Assert.DoesNotContain("\"lastFullScanAt\":", json);
         Assert.Contains("\"isStale\":true", json);
     }

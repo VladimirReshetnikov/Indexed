@@ -182,7 +182,7 @@ public sealed class FileContentProviderTests : IDisposable
         var provider = new FileContentProvider(withSep);
         Assert.Equal(
             Path.GetFullPath(_tempRoot).TrimEnd(Path.DirectorySeparatorChar),
-            provider.RepoRoot.TrimEnd(Path.DirectorySeparatorChar));
+            provider.PrimaryRootPath.TrimEnd(Path.DirectorySeparatorChar));
     }
 
     [Fact]
