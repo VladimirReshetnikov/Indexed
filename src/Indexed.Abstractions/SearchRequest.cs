@@ -39,7 +39,9 @@ namespace Indexed.Abstractions;
 /// </param>
 /// <param name="IsRegex">
 /// Whether <see cref="Pattern"/> is a regular expression rather than a literal.
-/// Ignored in <see cref="QueryMode.Prose"/>.
+/// Ignored in <see cref="QueryMode.Prose"/>. In <see cref="QueryMode.Auto"/>,
+/// setting this to <c>true</c> makes the request code-only because the prose
+/// engine consumes FTS5 match expressions rather than regex syntax.
 /// </param>
 /// <param name="CaseSensitive">
 /// Case-sensitivity flag for code searches. Prose searches are always
@@ -51,7 +53,9 @@ namespace Indexed.Abstractions;
 /// reduce payload size but not query time.
 /// </param>
 /// <param name="PathGlob">
-/// Optional gitignore-style glob applied to repository-relative POSIX paths.
+/// Optional gitignore-style glob applied to target-logical POSIX paths.
+/// For git and single-root directory targets this is the root-relative path;
+/// for directory-set targets it is <c>label/relative/path</c>.
 /// <c>null</c> means every indexed file is eligible.
 /// </param>
 /// <param name="ExcludeGlob">
@@ -80,7 +84,6 @@ namespace Indexed.Abstractions;
 /// with <see cref="IndexedErrorCode.TimeoutExceeded"/> and returns no matches
 /// — callers that need partial-result behavior must use a smaller
 /// <see cref="MaxMatches"/>/<see cref="MaxMatchesPerFile"/> cap instead.
-/// Partial-result rescue of accumulated matches is planned for Stage 3.
 /// </param>
 /// <example>
 /// <code>

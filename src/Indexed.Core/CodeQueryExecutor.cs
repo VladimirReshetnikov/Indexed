@@ -92,10 +92,10 @@ public sealed class CodeQueryExecutor
         var truncated = false;
         var total = 0;
 
-        // KindFilter: Stage 2 emits only SpanKind.Code. If the caller asked
-        // for a filter that doesn't include Code, there are no matches to
-        // return — short-circuit before any SQLite work. A null or empty
-        // filter means "any kind" and flows through normally.
+        // Code-mode queries emit only SpanKind.Code. If the caller asked for a
+        // filter that doesn't include Code, there are no matches to return —
+        // short-circuit before any SQLite work. A null or empty filter means
+        // "any kind" and flows through normally.
         if (request.KindFilter is { Count: > 0 } kf && !KindFilterIncludesCode(kf))
         {
             return new ExecuteResult(matches, truncated, total, sw.ElapsedMilliseconds);
@@ -176,9 +176,9 @@ public sealed class CodeQueryExecutor
         return new ExecuteResult(matches, truncated, total, sw.ElapsedMilliseconds);
     }
 
-    // Stage 2 emits only SpanKind.Code; the DTO's KindFilter is therefore
-    // meaningful only when it *excludes* Code. A caller that asks for
-    // `[XmlDoc]` gets no matches, while `[Code, XmlDoc]` behaves like the
+    // Code-mode queries emit only SpanKind.Code; the DTO's KindFilter is
+    // therefore meaningful only when it *excludes* Code. A caller that asks
+    // for `[XmlDoc]` gets no matches, while `[Code, XmlDoc]` behaves like the
     // unfiltered case.
     private static bool KindFilterIncludesCode(IReadOnlyList<SpanKind> filter)
     {
@@ -193,10 +193,11 @@ public sealed class CodeQueryExecutor
     // by rowid (insertion order during full-scan), which is *not* the same
     // as repo-root-relative path order. Callers who omit SortBy inherit the
     // DTO default (Path), so we always sort at the end of Execute to match
-    // the documented contract. Relevance is gated at the backend layer.
+    // the documented contract. Code-mode "relevance" currently degrades to
+    // the same stable path order because only prose hits carry BM25 scores.
     private static void SortMatches(List<Abstractions.Match> matches, SortBy sortBy)
     {
-        if (sortBy != SortBy.Path || matches.Count < 2) return;
+        if (matches.Count < 2) return;
         matches.Sort(static (a, b) =>
         {
             var byPath = string.CompareOrdinal(a.Path, b.Path);
@@ -254,7 +255,7 @@ public sealed class CodeQueryExecutor
                 Path: path,
                 Line: line,
                 Column: col,
-                ByteOffset: hit.Index, // character offset for Stage 2 — UTF-8 byte mapping is Stage 3+
+                ByteOffset: MatchExtraction.Utf8ByteOffsetOf(hit.Index, content),
                 Text: lineText,
                 Kind: SpanKind.Code,
                 Span: null,

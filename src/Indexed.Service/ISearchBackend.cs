@@ -10,9 +10,9 @@ namespace Indexed.Service;
 /// </summary>
 /// <remarks>
 /// <para>
-/// As of Stage 2 the production implementation is
-/// <see cref="SqliteSearchBackend"/>, which answers code-mode queries from the
-/// per-repo SQLite+FTS5 index. Test doubles are injected through
+/// The production implementation is <see cref="SqliteSearchBackend"/>, which
+/// answers code, prose, and auto queries from the per-target SQLite+FTS5
+/// index. Test doubles are injected through
 /// <see cref="DaemonOptions.BackendOverride"/>. The interface stays small on
 /// purpose: implementations own their own parsing, budgets, and freshness
 /// reporting and are swapped end-to-end.

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Text;
 
 namespace Indexed.Core;
 
@@ -11,11 +12,10 @@ namespace Indexed.Core;
 /// </summary>
 /// <remarks>
 /// <para>
-/// All offsets are <em>character</em> offsets into the .NET string (UTF-16
-/// code units). Stage 2 reports this position as <c>byteOffset</c> in the
-/// wire <see cref="Indexed.Abstractions.Match"/>; Stage 3+ replaces that with
-/// a true UTF-8 byte offset when the extractor layer lands. Callers must not
-/// depend on character-vs-byte equivalence yet.
+/// Line/column calculations operate on character offsets into the .NET string
+/// (UTF-16 code units). The separate <see cref="Utf8ByteOffsetOf"/> helper
+/// maps those positions to the wire-level UTF-8 byte offset reported in
+/// <see cref="Indexed.Abstractions.Match.ByteOffset"/>.
 /// </para>
 /// <para>
 /// Line numbers are 1-based; column numbers are 1-based and measured in
@@ -103,6 +103,19 @@ public static class MatchExtraction
         var arr = new string[take];
         for (var i = 0; i < take; i++) arr[i] = LineTextAt(content, lineOffsets, start + i);
         return arr;
+    }
+
+    /// <summary>
+    /// Convert a character offset in <paramref name="content"/> to a UTF-8 byte
+    /// offset.
+    /// </summary>
+    public static long Utf8ByteOffsetOf(int charOffset, string content)
+    {
+        if (string.IsNullOrEmpty(content) || charOffset <= 0)
+            return 0;
+
+        var clamped = Math.Clamp(charOffset, 0, content.Length);
+        return Encoding.UTF8.GetByteCount(content.AsSpan(0, clamped));
     }
 
     private static int BinarySearchLine(IReadOnlyList<int> offsets, int target)

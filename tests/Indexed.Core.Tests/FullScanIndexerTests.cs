@@ -129,4 +129,24 @@ public sealed class FullScanIndexerTests : IDisposable
         Assert.True(root.IsPrimary);
         Assert.Equal(Path.GetFullPath(repo), root.AbsolutePath);
     }
+
+    [Fact]
+    public async Task RunAsync_ExtractsProseFromCommentsAndMarkdown()
+    {
+        var repo = InitRepo(new[]
+        {
+            ("a.cs", "/// lifetime docs\nclass A { }\n"),
+            ("notes.md", "# Handbook\n\nlifetime matters here.\n"),
+        });
+
+        var target = GitIndexTarget.Open(repo);
+        var dbPath = Path.Combine(_tempRoot, "prose.db");
+        await using var index = SqliteIndex.OpenOrCreate(dbPath);
+
+        await new FullScanIndexer(target, index).RunAsync();
+
+        var xmlDocRows = await index.QueryProseCandidatesAsync("lifetime", "\uE000", "\uE001", default);
+        Assert.Contains(xmlDocRows, row => row.LogicalPath == "a.cs" && row.Kind == SpanKind.XmlDoc);
+        Assert.Contains(xmlDocRows, row => row.LogicalPath == "notes.md" && row.Kind == SpanKind.Markdown);
+    }
 }

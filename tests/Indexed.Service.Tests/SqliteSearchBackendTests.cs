@@ -34,8 +34,17 @@ public sealed class SqliteSearchBackendTests : IDisposable
         GitProcess.RunText(repoPath, new[] { "config", "user.name", "t" });
         GitProcess.RunText(repoPath, new[] { "config", "user.email", "t@t" });
         GitProcess.RunText(repoPath, new[] { "config", "commit.gpgsign", "false" });
-        File.WriteAllText(Path.Combine(repoPath, "a.cs"), "class A { int needle = 1; }");
-        GitProcess.RunText(repoPath, new[] { "add", "a.cs" });
+        File.WriteAllText(
+            Path.Combine(repoPath, "a.cs"),
+            """
+            /// greeting prose
+            class A
+            {
+                int needle = 1; // auto marker
+            }
+            """);
+        File.WriteAllText(Path.Combine(repoPath, "notes.md"), "# Handbook\n\nprose-only docs.\n");
+        GitProcess.RunText(repoPath, new[] { "add", "a.cs", "notes.md" });
         GitProcess.RunText(repoPath, new[] { "commit", "-q", "-m", "init" });
 
         var dbPath = Path.Combine(_tempRoot, "index.db");
@@ -74,41 +83,56 @@ public sealed class SqliteSearchBackendTests : IDisposable
     // ----- mode validation -----
 
     [Fact]
-    public async Task ProseMode_ReturnsNotImplemented()
+    public async Task ProseMode_FindsExtractedSpans()
     {
-        // Explicit prose is still unsupported in Stage 2; only the extractor
-        // layer (Stage 3) will populate prose_fts.
-        var req = new SearchRequest("test", Mode: QueryMode.Prose);
+        var req = new SearchRequest("greeting", Mode: QueryMode.Prose);
         var result = await _backend.SearchAsync(req, CancellationToken.None);
-        Assert.NotNull(result.Error);
-        Assert.Equal(IndexedErrorCode.NotImplemented, result.Error!.Code);
+
+        Assert.Null(result.Error);
+        var response = Assert.IsType<SearchResponse>(result.Response);
+        var match = Assert.Single(response.Matches);
+        Assert.Equal("a.cs", match.Path);
+        Assert.Equal(SpanKind.XmlDoc, match.Kind);
+        Assert.Equal(new MatchSpan(1, 1), match.Span);
     }
 
     [Fact]
-    public async Task AutoMode_FallsBackToCode_AndIsNotRejected()
+    public async Task AutoMode_MergesResults_AndPrefersProseOnSameLine()
     {
-        // Auto is the DTO default; rejecting it would be a usability
-        // regression. Until Stage 3 adds the prose planner the backend
-        // treats Auto as an alias for Code. The specific assertion is the
-        // negative one — no NotImplemented — because the positive hit
-        // depends on test-index contents and the shape of that harness.
-        var req = new SearchRequest("needle", Mode: QueryMode.Auto);
+        var req = new SearchRequest("marker", Mode: QueryMode.Auto);
         var result = await _backend.SearchAsync(req, CancellationToken.None);
-        Assert.False(
-            result.Error?.Code == IndexedErrorCode.NotImplemented,
-            $"Auto should not return NotImplemented; got: {result.Error?.Message}");
+
+        Assert.Null(result.Error);
+        var response = Assert.IsType<SearchResponse>(result.Response);
+        var match = Assert.Single(response.Matches);
+        Assert.Equal("a.cs", match.Path);
+        Assert.Equal(4, match.Line);
+        Assert.Equal(SpanKind.LineCommentBlock, match.Kind);
+        Assert.Equal(new MatchSpan(4, 4), match.Span);
     }
 
     [Fact]
-    public async Task RelevanceSort_ReturnsNotImplemented()
+    public async Task AutoMode_WithRegex_SkipsProseAndReturnsCodeMatches()
     {
-        // Stage 2 does not compute BM25 scores; the executor sorts by path
-        // only. Reject Relevance explicitly rather than silently return
-        // path-ordered results under a relevance label.
-        var req = new SearchRequest("test", Mode: QueryMode.Code, SortBy: SortBy.Relevance);
+        var req = new SearchRequest("marker", Mode: QueryMode.Auto, IsRegex: true);
         var result = await _backend.SearchAsync(req, CancellationToken.None);
-        Assert.NotNull(result.Error);
-        Assert.Equal(IndexedErrorCode.NotImplemented, result.Error!.Code);
+
+        Assert.Null(result.Error);
+        var response = Assert.IsType<SearchResponse>(result.Response);
+        var match = Assert.Single(response.Matches);
+        Assert.Equal(SpanKind.Code, match.Kind);
+        Assert.Null(match.Span);
+    }
+
+    [Fact]
+    public async Task RelevanceSort_IsAccepted()
+    {
+        var req = new SearchRequest("needle", Mode: QueryMode.Code, SortBy: SortBy.Relevance);
+        var result = await _backend.SearchAsync(req, CancellationToken.None);
+
+        Assert.True(
+            result.Error is null || result.Error.Code != IndexedErrorCode.NotImplemented,
+            $"unexpected NotImplemented: {result.Error?.Message}");
     }
 
     // ----- MaxMatches -----
@@ -131,12 +155,26 @@ public sealed class SqliteSearchBackendTests : IDisposable
     [InlineData(10_000)]
     public async Task MaxMatches_BoundaryValues_Accepted(int maxMatches)
     {
-        var req = new SearchRequest("needle", Mode: QueryMode.Code, MaxMatches: maxMatches);
+        var req = new SearchRequest(
+            "needle",
+            Mode: QueryMode.Code,
+            MaxMatches: maxMatches,
+            MaxMatchesPerFile: maxMatches);
         var result = await _backend.SearchAsync(req, CancellationToken.None);
         // Should not return a BadRequest error for boundary values
         Assert.True(
             result.Error is null || result.Error.Code != IndexedErrorCode.BadRequest,
             $"unexpected BadRequest: {result.Error?.Message}");
+    }
+
+    [Fact]
+    public async Task InvalidProsePattern_ReturnsPatternInvalid()
+    {
+        var req = new SearchRequest("\"", Mode: QueryMode.Prose);
+        var result = await _backend.SearchAsync(req, CancellationToken.None);
+
+        Assert.NotNull(result.Error);
+        Assert.Equal(IndexedErrorCode.PatternInvalid, result.Error!.Code);
     }
 
     // ----- MaxMatchesPerFile -----

@@ -30,10 +30,13 @@ Background-indexed full-text search service for a local workspace target, aimed 
 
 - **Literal search** over indexed code with ripgrep-style output (or JSON).
 - **Regex search** with trigram-based narrowing + .NET `Regex` verification.
+- **Prose search** over extracted XML docs, comment blocks, Markdown, and plain-text files.
+- **Truthful `auto` mode** that merges code and prose results, preferring prose on exact same-line collisions.
 - **Path filtering** via gitignore-style globs: `--glob` and `--exclude`.
 - **Index-time exclusion** (`--exclude-index`) plus curated default excludes for lockfiles/minified/generated outputs.
 - **Directory-tree and directory-set targets** via repeated `--root` flags, including continuous background indexing outside git.
 - **Context lines** (`-A`, `-B`, `-C`) without re-running a full scan per query.
+- **Kind-aware text output** for prose hits plus stable JSON contracts for agents.
 - **Explicit freshness** (`indexedRevisionToken`, `currentRevisionToken`, `pendingFileCount`, `isStale`) for agents and scripts.
 - **Daemon discovery by target** with `idx daemons` plus target-aware `daemon.json` metadata.
 - **Crash-safe persistence** (SQLite WAL mode) + background compaction (bounded FTS5 merges).
@@ -41,22 +44,22 @@ Background-indexed full-text search service for a local workspace target, aimed 
 ## Known limitations
 
 - **Windows-only** today (`net10.0-windows`).
-- **Stage 3 (prose extraction)** is not implemented yet; `--mode prose` returns `NotImplemented`.
 - **File size cap**: files larger than 50 MiB are treated as non-indexable.
 - **Multiline regex** is not supported (matches are line-oriented).
+- **Prose query syntax is FTS5 MATCH syntax**. `--mode prose` does not interpret `pattern` as a .NET regex; in `--mode auto`, `--regex` therefore runs the code side only.
 - **Directory-set queries use a logical-path namespace** (`label/relative/path`) that is stable once chosen; relabeling creates a distinct target.
 - Index footprint can be large for trigram indexing; see the size-reduction docs in `docs/`.
 
 ## Status
 
-Stages 0 through 2, 4, and 5 are implemented and tested. Stage 3 (prose extraction via Roslyn/regex) is pending. Code search with trigram indexing, incremental updates via FSW + HEAD polling, and productionization hardening are fully operational.
+Stages 0 through 5 are implemented and tested. Indexed now ships code search, prose extraction, truthful `auto` mode, background incremental indexing, workspace-target support, and productionization hardening in one coherent implementation.
 
 | Stage | Description | Status |
 |-------|-------------|--------|
 | S0 | Workspace scaffolding | Complete |
 | S1 | Enumeration + CLI + daemon bootstrap | Complete |
 | S2 | FTS5 code index + query planner | Complete |
-| S3 | Prose index + content extraction | Pending |
+| S3 | Prose index + content extraction | Complete |
 | S4 | Incremental indexer (FSW, HEAD polling, reconciliation) | Complete |
 | S5 | Productionization hardening | Complete |
 
@@ -81,11 +84,13 @@ src/Indexed/
         Indexed.Abstractions/    DTOs: SearchRequest, SearchResponse, Freshness, Match, etc.
         Indexed.Targets/         target identity, directory targets, logical-path rules
         Indexed.Git/             git.exe wrapper: process runner, repository operations
+        Indexed.Extractors/      Roslyn + regex-based prose extraction pipeline
         Indexed.Core/            SQLite+FTS5 index, query planner, full/incremental indexers
         Indexed.Service/         HTTP daemon host, idle-exit, lifecycle management
         Indexed.Cli/             CLI client (output: idx): argument parsing, daemon launcher
     tests/
         Indexed.Abstractions.Tests/
+        Indexed.Extractors.Tests/
         Indexed.Git.Tests/
         Indexed.Core.Tests/
         Indexed.Service.Tests/
@@ -102,6 +107,12 @@ dotnet test
 
 # Run a search (CLI auto-starts the daemon)
 dotnet run --project src/Indexed.Cli -- find "SearchRequest" --glob "src/**/*.cs"
+
+# Search extracted prose only
+dotnet run --project src/Indexed.Cli -- find "lifetime" --mode prose --kind xml-doc
+
+# Merge code + prose
+dotnet run --project src/Indexed.Cli -- find "DisposeAsync" --mode auto
 
 # Run against a non-git directory tree
 dotnet run --project src/Indexed.Cli -- find "TargetId" --root C:\src\scratch

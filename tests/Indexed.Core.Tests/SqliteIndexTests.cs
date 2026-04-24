@@ -3,7 +3,9 @@ using System.IO;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
+using Indexed.Abstractions;
 using Indexed.Core;
+using Indexed.Extractors;
 using Indexed.Targets;
 using Xunit;
 
@@ -154,6 +156,62 @@ public sealed class SqliteIndexTests : IDisposable
         Assert.Equal(0L, index.GetFileCount());
         var candidates = await index.QueryCodeCandidatesAsync("\"zet\"", default);
         Assert.Empty(candidates);
+    }
+
+    [Fact]
+    public async Task ReplaceProseSpans_ReplacesExistingRowsAndQueriesThem()
+    {
+        await using var index = SqliteIndex.OpenOrCreate(DbPath);
+        long fileId;
+
+        await using (var scope = await index.BeginWriteAsync())
+        {
+            fileId = UpsertFileForTest(
+                scope,
+                "src/foo.cs",
+                mtimeUtc: 1,
+                sizeBytes: 10,
+                sha256: new byte[32],
+                language: "csharp",
+                indexedAt: 2,
+                textForTokenization: "class Foo { }");
+
+            SqliteIndex.ReplaceProseSpans(
+                scope,
+                fileId,
+                new[]
+                {
+                    new ExtractedProseSpan(3, 4, SpanKind.XmlDoc, "needle docs\nother line"),
+                });
+        }
+
+        var firstRows = await index.QueryProseCandidatesAsync("needle", "\uE000", "\uE001", default);
+        var first = Assert.Single(firstRows);
+        Assert.Equal("src/foo.cs", first.LogicalPath);
+        Assert.Equal(SpanKind.XmlDoc, first.Kind);
+        Assert.Equal(3, first.StartLine);
+        Assert.Equal(4, first.EndLine);
+        Assert.Contains("\uE000needle\uE001", first.Highlighted);
+
+        await using (var scope = await index.BeginWriteAsync())
+        {
+            SqliteIndex.ReplaceProseSpans(
+                scope,
+                fileId,
+                new[]
+                {
+                    new ExtractedProseSpan(8, 8, SpanKind.LineCommentBlock, "replacement"),
+                });
+        }
+
+        var oldRows = await index.QueryProseCandidatesAsync("needle", "\uE000", "\uE001", default);
+        Assert.Empty(oldRows);
+
+        var replacementRows = await index.QueryProseCandidatesAsync("replacement", "\uE000", "\uE001", default);
+        var replacement = Assert.Single(replacementRows);
+        Assert.Equal(SpanKind.LineCommentBlock, replacement.Kind);
+        Assert.Equal(8, replacement.StartLine);
+        Assert.Equal(8, replacement.EndLine);
     }
     [Fact]
     public async Task GetAllPathsWithSha_ReturnsEveryRow()

@@ -5,7 +5,7 @@
 
 ## 1. Overview
 
-Indexed provides full-text code search via two interfaces:
+Indexed provides full-text workspace search via two interfaces:
 
 - **`idx` CLI** — Human-friendly terminal tool with ripgrep-style output.
 - **HTTP/JSON API** — Agent-friendly programmatic interface on localhost.
@@ -133,8 +133,8 @@ idx find <pattern> [--mode auto|code|prose]
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--mode` | `auto` | Query mode: `auto`, `code`, or `prose`. Code uses trigram narrowing; prose uses porter stemming (Stage 3). |
-| `--regex`, `-e` | off | Treat pattern as a .NET regular expression. |
+| `--mode` | `auto` | Query mode: `auto`, `code`, or `prose`. `auto` merges code and prose when both are meaningful; prose uses porter stemming over extracted spans. |
+| `--regex`, `-e` | off | Treat pattern as a .NET regular expression. In `auto` mode this disables the prose side because prose search consumes FTS5 MATCH syntax, not regex. |
 | `--case-sensitive`, `-s` | off | Case-sensitive matching. Ignored in prose mode. |
 | `--glob`, `-g` | none | Restrict search to files matching this glob (e.g., `src/**/*.cs`). |
 | `--exclude` | none | Exclude files matching this glob from query results. Repeatable. |
@@ -164,6 +164,12 @@ idx find "SqliteIndex" --glob "src/**/*.cs"
 # Regex search
 idx find -e "class\s+\w+Index" --case-sensitive
 
+# Search prose only
+idx find "lifetime" --mode prose --kind xml-doc
+
+# Merge code + prose, preferring prose on same-line collisions
+idx find "DisposeAsync" --mode auto
+
 # Search with context lines
 idx find "Dispose" -C 3
 
@@ -187,7 +193,14 @@ src/Indexed.Core/SqliteIndex.cs:42:8:    public static SqliteIndex OpenOrCreate(
 src/Indexed.Core/SqliteIndex.cs:150:12:    public async ValueTask DisposeAsync()
 ```
 
-Format: `path:line:column:text`. Context lines use `-` as the separator character.
+Format: `path:line:column:text` for code hits. Prose hits are prefixed with their
+kind and enclosing span, for example:
+
+```text
+[xml-doc:lines 40-44] src/Indexed.Core/SqliteIndex.cs:42:8:Open or create the index database.
+```
+
+Context lines use `-` as the separator character.
 
 **Exit codes:**
 
@@ -323,7 +336,7 @@ All fields except `pattern` are optional:
 |-------|---------|-------------|
 | `pattern` | (required) | Search pattern, literal or regex |
 | `mode` | `"auto"` | `"auto"`, `"code"`, or `"prose"` |
-| `isRegex` | `false` | Treat pattern as .NET regex |
+| `isRegex` | `false` | Treat pattern as .NET regex for code mode. In prose mode the pattern is always interpreted as FTS5 MATCH syntax; in auto mode `true` suppresses the prose side. |
 | `caseSensitive` | `false` | Case-sensitive matching |
 | `kindFilter` | (all) | Array of `SpanKind` values to include |
 | `pathGlob` | (all files) | Glob to restrict file paths |
@@ -571,7 +584,7 @@ SQLite database in WAL mode. Contains (schema version 3):
 | `roots` | Target roots: label, absolute path, primary-root flag |
 | `files` | File metadata keyed by `root_id + relative_path`, with stable `logical_path` returned to the caller |
 | `code_fts` | FTS5 virtual table with trigram tokenizer; **contentless** (`content = ''`, `contentless_delete = 1`). Only the posting list is stored — match snippets are read from the working tree at query time. |
-| `prose_fts` | FTS5 virtual table with porter+unicode61 tokenizer (Stage 3) |
+| `prose_fts` | FTS5 virtual table with porter+unicode61 tokenizer for extracted prose spans |
 | `meta` | Key-value metadata: schema version, target identity, indexed revision token, scan/reconciliation timestamps |
 
 Inspect with `sqlite3`:

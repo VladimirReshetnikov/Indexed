@@ -132,6 +132,22 @@ public sealed class CodeQueryExecutorTests : IDisposable
     }
 
     [Fact]
+    public async Task ByteOffset_UsesUtf8BytePosition()
+    {
+        await using var index = await SeedAsync(new[]
+        {
+            ("a.cs", "café needle\n"),
+        });
+
+        var request = new SearchRequest("needle", Mode: QueryMode.Code);
+        var plan = CodeQueryPlanner.Build(request);
+        var result = await NewExecutor(index).ExecuteAsync(request, plan, default);
+
+        var match = Assert.Single(result.Matches);
+        Assert.Equal(6, match.ByteOffset);
+    }
+
+    [Fact]
     public async Task ContextBeforeAndAfter_AttachedToMatch()
     {
         await using var index = await SeedAsync(new[]

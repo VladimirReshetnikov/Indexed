@@ -62,10 +62,9 @@ public enum IndexedErrorCode
 
     /// <summary>
     /// The requested capability is recognized but not yet implemented at the
-    /// current staging level. Stage 2 uses this for <see cref="QueryMode.Prose"/>
-    /// and for <c>sortBy=relevance</c> (requires BM25 scoring that Stage 3
-    /// will add). <see cref="QueryMode.Auto"/> is <em>not</em> mapped to this
-    /// code — it is served as an alias of <see cref="QueryMode.Code"/>.
+    /// current build. Search mode selection and relevance sorting no longer use
+    /// this code; it remains available for future optional endpoints or admin
+    /// surfaces that may be acknowledged before they are implemented.
     /// Maps to HTTP 501.
     /// </summary>
     [JsonStringEnumMemberName("not-implemented")]

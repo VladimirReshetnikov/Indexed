@@ -4,6 +4,7 @@ using System.IO;
 using System.Security.Cryptography;
 using System.Threading;
 using System.Threading.Tasks;
+using Indexed.Extractors;
 using Indexed.Targets;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -18,11 +19,11 @@ namespace Indexed.Core;
 /// </summary>
 /// <remarks>
 /// <para>
-/// Stage 2 has no watcher, so this class is also the daemon's "startup
-/// warm-up" path: when <see cref="DaemonHost"/> detects an empty or
-/// schema-mismatched DB it runs a full scan before serving queries (proposal
-/// §9.1 and plan task 2.7). Stage 4 keeps this class for cold rebuilds but
-/// routes ongoing changes through a real event loop.
+/// This class is the daemon's cold-start and rebuild path: when
+/// <see cref="DaemonHost"/> detects an empty or schema-mismatched DB it runs a
+/// full scan before serving queries. Ongoing edits are handled by
+/// <see cref="IncrementalIndexer"/>, but the full scan still owns the
+/// authoritative "enumerate everything and restamp the world" pass.
 /// </para>
 /// <para>
 /// Transaction granularity: batches of up to <see cref="BatchFileCount"/>
@@ -37,6 +38,9 @@ namespace Indexed.Core;
 /// the caller-supplied <see cref="IProgress{T}"/> (optional). Targets may
 /// provide an exact total through <see cref="IFileCountHintTarget"/>; when
 /// unavailable the total remains <see langword="null"/>.
+/// Each indexed file updates both the contentless trigram code surface and,
+/// when an extractor is registered for the extension, the stored prose spans
+/// in <c>prose_fts</c>.
 /// </para>
 /// </remarks>
 public sealed class FullScanIndexer
@@ -58,6 +62,7 @@ public sealed class FullScanIndexer
     private readonly SqliteIndex _index;
     private readonly ILogger _logger;
     private readonly ExcludeFilter _excludeFilter;
+    private readonly ExtractorRegistry _extractorRegistry;
     private readonly IExplicitBinaryPathProvider? _explicitBinaryPathProvider;
     private readonly IFileCountHintTarget? _fileCountHintTarget;
     private IReadOnlyDictionary<string, long>? _rootIds;
@@ -77,12 +82,14 @@ public sealed class FullScanIndexer
         IIndexTarget target,
         SqliteIndex index,
         IReadOnlyList<string>? excludeGlobs = null,
-        ILogger? logger = null)
+        ILogger? logger = null,
+        ExtractorRegistry? extractorRegistry = null)
     {
         _target = target ?? throw new ArgumentNullException(nameof(target));
         _index = index ?? throw new ArgumentNullException(nameof(index));
         _logger = logger ?? NullLogger.Instance;
         _excludeFilter = new ExcludeFilter(excludeGlobs);
+        _extractorRegistry = extractorRegistry ?? ExtractorRegistry.BuildDefault();
         _explicitBinaryPathProvider = target as IExplicitBinaryPathProvider;
         _fileCountHintTarget = target as IFileCountHintTarget;
     }
@@ -186,8 +193,9 @@ public sealed class FullScanIndexer
 
                 var content = TextDecoder.Decode(bytes);
                 var language = LanguageGuess.FromPath(logicalPath);
+                var proseSpans = _extractorRegistry.Extract(logicalPath, content);
 
-                SqliteIndex.UpsertFile(
+                var fileId = SqliteIndex.UpsertFile(
                     scope: scope,
                     rootId: GetRootId(file.Root),
                     relativePath: file.RelativePath,
@@ -198,6 +206,7 @@ public sealed class FullScanIndexer
                     language: language,
                     indexedAt: DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
                     textForTokenization: content);
+                SqliteIndex.ReplaceProseSpans(scope, fileId, proseSpans);
 
                 stats.Indexed++;
                 filesInBatch++;

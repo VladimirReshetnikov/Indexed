@@ -4,6 +4,8 @@ using System.Data;
 using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
+using Indexed.Abstractions;
+using Indexed.Extractors;
 using Indexed.Targets;
 using Microsoft.Data.Sqlite;
 
@@ -561,6 +563,45 @@ public sealed class SqliteIndex : IAsyncDisposable
     }
 
     /// <summary>
+    /// Replace every stored prose span for <paramref name="fileId"/> with
+    /// <paramref name="spans"/> inside the caller's writer transaction.
+    /// </summary>
+    public static void ReplaceProseSpans(
+        WriterScope scope,
+        long fileId,
+        IReadOnlyList<ExtractedProseSpan> spans)
+    {
+        if (scope is null) throw new ArgumentNullException(nameof(scope));
+        if (spans is null) throw new ArgumentNullException(nameof(spans));
+
+        var conn = scope.Connection;
+
+        using (var delete = conn.CreateCommand())
+        {
+            delete.Transaction = scope.Transaction;
+            delete.CommandText = "DELETE FROM prose_fts WHERE file_id = $id;";
+            delete.Parameters.AddWithValue("$id", fileId);
+            delete.ExecuteNonQuery();
+        }
+
+        foreach (var span in spans)
+        {
+            using var insert = conn.CreateCommand();
+            insert.Transaction = scope.Transaction;
+            insert.CommandText = """
+                INSERT INTO prose_fts(content, kind, start_line, end_line, file_id)
+                VALUES($content, $kind, $startLine, $endLine, $fileId);
+                """;
+            insert.Parameters.AddWithValue("$content", span.Content);
+            insert.Parameters.AddWithValue("$kind", ToStoredSpanKind(span.Kind));
+            insert.Parameters.AddWithValue("$startLine", span.StartLine);
+            insert.Parameters.AddWithValue("$endLine", span.EndLine);
+            insert.Parameters.AddWithValue("$fileId", fileId);
+            insert.ExecuteNonQuery();
+        }
+    }
+
+    /// <summary>
     /// Look up the <c>sha256</c> currently recorded for <paramref name="logicalPath"/>.
     /// Returns an empty array when absent.
     /// </summary>
@@ -664,6 +705,58 @@ public sealed class SqliteIndex : IAsyncDisposable
             if (rows.TryGetValue(id, out var row)) result.Add(row);
         }
         return result;
+    }
+
+    /// <summary>
+    /// Query prose spans matching the supplied FTS5 expression and return the
+    /// joined file/path metadata needed by <see cref="ProseQueryExecutor"/>.
+    /// </summary>
+    public async ValueTask<IReadOnlyList<ProseCandidateRow>> QueryProseCandidatesAsync(
+        string matchExpression,
+        string highlightStartMarker,
+        string highlightEndMarker,
+        CancellationToken cancellationToken)
+    {
+        ThrowIfDisposed();
+        await using var lease = await RentReaderAsync(cancellationToken).ConfigureAwait(false);
+        using var cmd = lease.Connection.CreateCommand();
+        cmd.CommandText = """
+            SELECT prose_fts.file_id,
+                   files.logical_path,
+                   prose_fts.kind,
+                   prose_fts.start_line,
+                   prose_fts.end_line,
+                   prose_fts.content,
+                   highlight(prose_fts, 0, $highlightStart, $highlightEnd) AS highlighted,
+                   bm25(prose_fts) AS rank
+            FROM prose_fts
+            JOIN files ON files.file_id = prose_fts.file_id
+            WHERE prose_fts MATCH $q
+            ORDER BY bm25(prose_fts),
+                     files.logical_path,
+                     prose_fts.start_line,
+                     prose_fts.rowid;
+            """;
+        cmd.Parameters.AddWithValue("$q", matchExpression);
+        cmd.Parameters.AddWithValue("$highlightStart", highlightStartMarker);
+        cmd.Parameters.AddWithValue("$highlightEnd", highlightEndMarker);
+
+        var rows = new List<ProseCandidateRow>();
+        using var reader = await cmd.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            rows.Add(new ProseCandidateRow(
+                FileId: reader.GetInt64(0),
+                LogicalPath: reader.GetString(1),
+                Kind: ParseStoredSpanKind(reader.GetString(2)),
+                StartLine: reader.GetInt32(3),
+                EndLine: reader.GetInt32(4),
+                Content: reader.GetString(5),
+                Highlighted: reader.IsDBNull(6) ? null : reader.GetString(6),
+                Rank: reader.IsDBNull(7) ? 0 : reader.GetDouble(7)));
+        }
+
+        return rows;
     }
 
     /// <summary>
@@ -1100,6 +1193,28 @@ public sealed class SqliteIndex : IAsyncDisposable
 
     private static string NormalizeRootLookupKey(string absolutePath)
         => TargetPathUtilities.NormalizeForComparison(absolutePath);
+
+    internal static string ToStoredSpanKind(SpanKind kind) => kind switch
+    {
+        SpanKind.Code => "code",
+        SpanKind.Markdown => "markdown",
+        SpanKind.PlainText => "plain-text",
+        SpanKind.XmlDoc => "xml-doc",
+        SpanKind.LineCommentBlock => "line-comment-block",
+        SpanKind.BlockComment => "block-comment",
+        _ => throw new ArgumentOutOfRangeException(nameof(kind), kind, "unknown span kind"),
+    };
+
+    internal static SpanKind ParseStoredSpanKind(string value) => value switch
+    {
+        "code" => SpanKind.Code,
+        "markdown" => SpanKind.Markdown,
+        "plain-text" => SpanKind.PlainText,
+        "xml-doc" => SpanKind.XmlDoc,
+        "line-comment-block" => SpanKind.LineCommentBlock,
+        "block-comment" => SpanKind.BlockComment,
+        _ => throw new InvalidOperationException($"unknown stored span kind '{value}'"),
+    };
 }
 
 /// <summary>
@@ -1114,6 +1229,19 @@ public sealed class SqliteIndex : IAsyncDisposable
 /// <param name="LogicalPath">Logical path exposed to the search/query layer.</param>
 /// <param name="Sha256">At-index-time SHA-256 of the file content.</param>
 public sealed record FileRow(long FileId, string LogicalPath, byte[] Sha256);
+
+/// <summary>
+/// Prose-row projection returned by <see cref="SqliteIndex.QueryProseCandidatesAsync"/>.
+/// </summary>
+public sealed record ProseCandidateRow(
+    long FileId,
+    string LogicalPath,
+    SpanKind Kind,
+    int StartLine,
+    int EndLine,
+    string Content,
+    string? Highlighted,
+    double Rank);
 
 /// <summary>
 /// Exclusive writer scope; all work happens on one transaction that commits

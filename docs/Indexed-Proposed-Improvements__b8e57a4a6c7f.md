@@ -33,8 +33,8 @@ especially:
 
 The main gaps are now concentrated in six areas:
 
-1. Feature completeness is still uneven because Stage 3 prose indexing is
-   missing.
+1. Prose search now exists, but the next wave of completeness work is about
+   deepening it rather than merely turning it on.
 2. Operational visibility is still mostly target-global even though multi-root
    directory sets are now first-class.
 3. Repeated use of non-git targets is still more manual than it should be.
@@ -61,26 +61,25 @@ The recommendations below follow these principles:
 
 ## 4. Recommended Improvements
 
-### 4.1 Complete Stage 3: Prose Indexing and Truthful `auto` Mode
+### 4.1 Completed: Stage 3 Prose Indexing and Truthful `auto` Mode
 
-This is the most obvious missing piece. The README still lists Stage 3 as
-pending, and the original architecture proposal treated prose search as a
-first-class part of the product rather than an optional extra.
+This recommendation has now been implemented. Indexed ships a dedicated
+`Indexed.Extractors` project, stores extracted spans in `prose_fts`, serves
+real `mode=prose` queries, and runs a truthful merged `mode=auto`.
 
-**What to add**
+**What landed**
 
-- A dedicated extraction layer for prose spans, preferably in a new
-  `Indexed.Extractors` project.
-- A `prose_fts` index and the schema/version work needed to store extracted
-  spans alongside code rows.
+- A dedicated `Indexed.Extractors` project.
+- Population of the existing `prose_fts` surface with extracted spans.
 - Whole-file prose extraction for Markdown and plain text.
-- Roslyn-backed extraction for C# XML doc comments and comment blocks.
-- Honest `mode` behavior: once prose exists, `auto` can really mean
-  code-plus-prose; until then, unsupported combinations should stay explicit.
-- Search result semantics that align docs, DTOs, and implementation for
-  `kind`, `TotalMatches`, sorting, and span reporting.
+- Roslyn-backed C# XML doc/comment extraction plus regex-based extractors for
+  other comment syntaxes.
+- Honest `mode` behavior: `auto` now merges code and prose results, and prose
+  search is no longer staged fiction.
+- Search/result semantics aligned across docs, DTOs, implementation, and CLI
+  output.
 
-**Why it matters**
+**Why it mattered**
 
 - It closes the biggest documented product gap.
 - It increases the value of Indexed for agent workflows that search comments,
@@ -89,11 +88,12 @@ first-class part of the product rather than an optional extra.
   being "code search plus future prose" and becomes the mixed code/prose engine
   it was designed to be.
 
-**Suggested scope**
+**What remains**
 
-- One schema bump.
-- One new extraction-focused project plus updates across `Indexed.Core`,
-  `Indexed.Service`, `Indexed.Cli`, and tests.
+- Better prose query ergonomics than raw FTS5 MATCH syntax.
+- More sophisticated relevance tuning and highlighting for prose-heavy queries.
+- Broader extractor coverage when real usage identifies the next highest-value
+  languages or document formats.
 - Roughly 15-25 source files and 30-50 focused tests.
 
 ### 4.2 Add a First-Class Target Registry for Recurring Workspaces

@@ -2,7 +2,7 @@
 
 - Created (UTC): 2026-04-15T17:00:00Z
 - Repository HEAD: cd463ca87356b067e49fe274a1ebcb6e92376c1d
-- Status: Current-state architecture for the Indexed full-text search service. Covers Stages 0–2, 4–5 as implemented. Stage 3 (prose extraction) is documented as future work where it affects the schema.
+- Status: Current-state architecture for the Indexed full-text search service. Covers Stages 0–5 as implemented, including prose extraction and truthful `auto` mode.
 
 ## 1. System overview
 
@@ -78,16 +78,19 @@ Primary consumers are AI coding agents. The service is designed for:
 
 ## 2. Project structure and dependencies
 
-Six source projects and five test projects:
+Seven source projects and six test projects:
 
 ```
 Indexed.Targets       ← no dependencies; target contracts and identity
     ↑
 Indexed.Abstractions  ← references Targets; DTOs + JSON context
     ↑
+Indexed.Extractors    ← references Abstractions
+    ↑                    NuGet: Microsoft.CodeAnalysis.CSharp 4.14.0
+    ↑
 Indexed.Git           ← references Targets
     ↑
-Indexed.Core          ← references Abstractions + Git + Targets
+Indexed.Core          ← references Abstractions + Extractors + Git + Targets
     ↑                    NuGet: Microsoft.Data.Sqlite 9.0.8
     │                           Microsoft.Extensions.Logging.Abstractions 9.0.0
     ↑
@@ -106,6 +109,7 @@ All projects target `net10.0-windows`, with nullable reference types enabled and
 |-------|---------|------|----------|
 | Targets | `Indexed.Targets` | Target contracts, canonical target specs, target ids, directory targets, logical-path mapping | Depend on Git or SQLite |
 | Contracts | `Indexed.Abstractions` | All DTOs, enums, JSON context | Depend on Core, Service, or Git |
+| Extraction | `Indexed.Extractors` | Roslyn and regex-based prose extraction, span normalization | Know about daemon lifecycle or SQL |
 | Git adapter | `Indexed.Git` | `git.exe` invocation, repo operations, git-backed target implementation | Know about FTS5, trigrams, or SQL |
 | Index engine | `Indexed.Core` | SQLite schema, FTS5 wrapper, query planning, full/incremental indexing, debouncing, file watching | Call HTTP, know about daemon lifecycle |
 | Service | `Indexed.Service` | Daemon bootstrap, HTTP surface, idle-exit, lifecycle | Contain query or indexing logic |
@@ -236,7 +240,8 @@ The lists are concatenated and applied uniformly by the full-scan indexer, the i
    - Resolve `root_id`, `relative_path`, and `logical_path`.
    - Compute SHA-256; skip if unchanged from `files.sha256`.
    - Read bytes; decode via `TextDecoder` (BOM-aware: UTF-32 LE/BE, UTF-16 LE/BE, UTF-8 BOM, UTF-8 fallback).
-   - UPSERT into `files` + `code_fts` within a transaction.
+   - Run the extension-mapped extraction pipeline (XML docs, line comments, block comments, Markdown, plain text).
+   - UPSERT into `files` + `code_fts`, then replace that file's `prose_fts` rows within the same transaction.
 4. Batch size: 200 files or 250 ms per transaction.
 5. On completion, write `indexed_head` / revision token (when present) and `last_full_scan_at` to `meta`.
 
@@ -334,8 +339,8 @@ The FTS5 posting list is a *candidate oracle*, not the source of truth for match
 | Mode | Engine | Status |
 |------|--------|--------|
 | `code` | FTS5 trigram → candidate files → regex/literal scan | Implemented |
-| `prose` | FTS5 porter+unicode61 → stemmed word search | Returns `NotImplemented` (Stage 3) |
-| `auto` | Merge code + prose results | Returns `NotImplemented` for prose component |
+| `prose` | FTS5 porter+unicode61 → stemmed word search over extracted spans | Implemented |
+| `auto` | Run both surfaces when meaningful, then merge with prose-preferred same-line dedupe | Implemented |
 
 ## 6. Daemon lifecycle (`DaemonHost`)
 
@@ -500,11 +505,12 @@ Both delete and upsert scopes in `IncrementalIndexer` wrap their work in `try/ca
 
 ## 14. Test coverage
 
-Coverage is organized across five test projects:
+Coverage is organized across six test projects:
 
 | Test project | Coverage |
 |-------------|----------|
 | `Indexed.Abstractions.Tests` | JSON serialization round-trips for DTO evolution, including target metadata and freshness compatibility fields |
+| `Indexed.Extractors.Tests` | Roslyn and regex extractor behavior, normalization, and extension-to-extractor mapping |
 | `Indexed.Git.Tests` | Diff-tree parsing, untracked file listing, index mtime, rename handling, and git-target behavior |
 | `Indexed.Core.Tests` | SQLite operations (including schema v3 roots/files layout), full scan, incremental indexing, directory targets, reconciliation, query planning, regex trigrams, debouncing, text decoding, globs, excludes, and disk-read snippet rehydration |
 | `Indexed.Service.Tests` | HTTP contract, daemon info, idle-exit timer, target selection, daemon catalog, default-exclude wiring, and end-to-end git/directory host scenarios |
@@ -512,14 +518,7 @@ Coverage is organized across five test projects:
 
 Integration tests in `Indexed.Core.Tests` and `Indexed.Service.Tests` spin up real directory trees and git repositories in temp directories and exercise end-to-end scenarios for both git and non-git targets.
 
-## 15. Future work (Stage 3 and beyond)
-
-### Stage 3 — Prose extraction
-
-- `Indexed.Extractors` project with Roslyn C# extractor + regex extractors.
-- XML doc comment stripping (tag names removed, inner text preserved, `cref` targets as tokens).
-- `prose_fts` table populated with per-span rows.
-- `mode: "prose"` and `mode: "auto"` fully operational.
+## 15. Future work
 
 ### Stage 6 (optional)
 

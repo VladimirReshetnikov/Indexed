@@ -75,6 +75,16 @@ public sealed class IncrementalIndexerTests : IDisposable
         }
     }
 
+    private static async Task WaitForAsync(Func<Task<bool>> condition, int timeoutMs = 5000)
+    {
+        using var cts = new System.Threading.CancellationTokenSource(timeoutMs);
+        while (!await condition().ConfigureAwait(false))
+        {
+            cts.Token.ThrowIfCancellationRequested();
+            await Task.Delay(50, cts.Token).ConfigureAwait(false);
+        }
+    }
+
     [Fact]
     public async Task FileChanged_UpsertsNewFile()
     {
@@ -259,5 +269,36 @@ public sealed class IncrementalIndexerTests : IDisposable
         await indexer.DisposeAsync();
 
         Assert.True(committed);
+    }
+
+    [Fact]
+    public async Task FileChanged_RefreshesExtractedProseSpans()
+    {
+        var repoPath = InitRepo(new[] { ("a.cs", "// old marker\nclass A { }\n") });
+        var target = GitIndexTarget.Open(repoPath);
+        var dbPath = Path.Combine(_tempRoot, "prose-refresh.db");
+        await using var index = SqliteIndex.OpenOrCreate(dbPath);
+
+        await new FullScanIndexer(target, index).RunAsync();
+        Assert.NotEmpty(await index.QueryProseCandidatesAsync("old", "\uE000", "\uE001", default));
+
+        File.WriteAllText(Path.Combine(repoPath, "a.cs"), "// fresh marker\nclass A { }\n");
+
+        using var queue = new DebouncingEventQueue(
+            perPathDebounce: TimeSpan.FromMilliseconds(5),
+            globalBatchWindow: TimeSpan.FromMilliseconds(30));
+
+        await using var indexer = new IncrementalIndexer(target, index, queue);
+        indexer.Start();
+
+        queue.Enqueue(new FileChanged("a.cs"));
+        await WaitForAsync(async () =>
+        {
+            var fresh = await index.QueryProseCandidatesAsync("fresh", "\uE000", "\uE001", default);
+            var old = await index.QueryProseCandidatesAsync("old", "\uE000", "\uE001", default);
+            return fresh.Count > 0 && old.Count == 0;
+        });
+
+        await indexer.DisposeAsync();
     }
 }

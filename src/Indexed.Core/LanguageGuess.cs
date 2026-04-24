@@ -6,12 +6,13 @@ namespace Indexed.Core;
 /// <summary>
 /// Extension-driven language classifier used to populate <c>files.language</c>.
 /// Returns <c>null</c> for files the classifier doesn't recognize — that
-/// column is advisory only and Stage 2 doesn't filter by it.
+/// column is advisory only and does not directly control query behavior.
 /// </summary>
 /// <remarks>
-/// Kept deliberately small: Stage 2 persists this for later stages to inspect,
-/// but it never drives indexing decisions. Stage 3's extractor selection may
-/// consult it; Stage 6 can replace this with a real detector (e.g. Linguist).
+/// Kept deliberately small: the index persists it for diagnostics and future
+/// heuristics, but extractor selection is extension-driven today. A future
+/// revision can replace this with a real detector (for example, Linguist) if
+/// extension-only classification becomes a practical problem.
 /// </remarks>
 internal static class LanguageGuess
 {

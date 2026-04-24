@@ -312,6 +312,14 @@ public sealed class MatchExtractionTests
         Assert.Equal("latte", MatchExtraction.LineTextAt(content, offsets, 2));
     }
 
+    [Fact]
+    public void Utf8ByteOffsetOf_UsesUtf8Bytes_NotUtf16Chars()
+    {
+        // "café " is 5 UTF-16 chars but 6 UTF-8 bytes because 'é' expands.
+        var content = "café needle";
+        Assert.Equal(6, MatchExtraction.Utf8ByteOffsetOf(5, content));
+    }
+
     // ===== Round-trip: offset → line/col → text =====
 
     [Fact]

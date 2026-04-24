@@ -4,6 +4,7 @@ using System.IO;
 using System.Security.Cryptography;
 using System.Threading;
 using System.Threading.Tasks;
+using Indexed.Extractors;
 using Indexed.Targets;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -41,6 +42,7 @@ public sealed class IncrementalIndexer : IAsyncDisposable
     private readonly DebouncingEventQueue _queue;
     private readonly ILogger _logger;
     private readonly ExcludeFilter _excludeFilter;
+    private readonly ExtractorRegistry _extractorRegistry;
     private readonly IRevisionDiffTarget? _revisionDiffTarget;
     private readonly IExplicitBinaryPathProvider? _explicitBinaryPathProvider;
     private readonly CancellationTokenSource _cts = new();
@@ -99,13 +101,15 @@ public sealed class IncrementalIndexer : IAsyncDisposable
         SqliteIndex index,
         DebouncingEventQueue queue,
         IReadOnlyList<string>? excludeGlobs = null,
-        ILogger? logger = null)
+        ILogger? logger = null,
+        ExtractorRegistry? extractorRegistry = null)
     {
         _target = target ?? throw new ArgumentNullException(nameof(target));
         _index = index ?? throw new ArgumentNullException(nameof(index));
         _queue = queue ?? throw new ArgumentNullException(nameof(queue));
         _logger = logger ?? NullLogger.Instance;
         _excludeFilter = new ExcludeFilter(excludeGlobs);
+        _extractorRegistry = extractorRegistry ?? ExtractorRegistry.BuildDefault();
         _revisionDiffTarget = target as IRevisionDiffTarget;
         _explicitBinaryPathProvider = target as IExplicitBinaryPathProvider;
     }
@@ -360,8 +364,9 @@ public sealed class IncrementalIndexer : IAsyncDisposable
 
                     var content = TextDecoder.Decode(bytes);
                     var language = LanguageGuess.FromPath(logicalPath);
+                    var proseSpans = _extractorRegistry.Extract(logicalPath, content);
 
-                    SqliteIndex.UpsertFile(
+                    var fileId = SqliteIndex.UpsertFile(
                         scope: scope,
                         rootId: GetRootId(file.Root),
                         relativePath: file.RelativePath,
@@ -372,6 +377,7 @@ public sealed class IncrementalIndexer : IAsyncDisposable
                         language: language,
                         indexedAt: DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
                         textForTokenization: content);
+                    SqliteIndex.ReplaceProseSpans(scope, fileId, proseSpans);
 
                     upserted++;
                 }

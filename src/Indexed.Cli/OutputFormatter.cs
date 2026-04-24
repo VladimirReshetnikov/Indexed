@@ -12,10 +12,12 @@ namespace Indexed.Cli;
 /// </summary>
 /// <remarks>
 /// <para>
-/// Text form: <c>path:line:col:text</c>, one match per line. Matches agents
-/// and pipelines that grew up around <c>grep</c>/<c>rg</c>. When context
-/// lines are present they are emitted as <c>path-line-text</c> (ripgrep's
-/// convention distinguishes matches from context with <c>:</c> vs. <c>-</c>).
+/// Text form is grep-like by design: code hits render as
+/// <c>path:line:col:text</c>; prose hits add a compact
+/// <c>[kind:line(s) ...]</c> prefix so humans can see the span semantics
+/// without switching to JSON. When context lines are present they are emitted
+/// as <c>path-line-text</c> (ripgrep's convention distinguishes matches from
+/// context with <c>:</c> vs. <c>-</c>).
 /// </para>
 /// <para>
 /// JSON form: the raw <see cref="SearchResponse"/> wire payload with pretty
@@ -40,7 +42,7 @@ internal static class OutputFormatter
                 beforeLine++;
             }
 
-            writer.WriteLine($"{match.Path}:{match.Line}:{match.Column}:{match.Text}");
+            writer.WriteLine($"{FormatMatchPrefix(match)}{match.Path}:{match.Line}:{match.Column}:{match.Text}");
 
             var afterLine = match.Line + 1;
             foreach (var ctx in match.ContextAfter)
@@ -146,4 +148,29 @@ internal static class OutputFormatter
         var prefix = string.IsNullOrEmpty(root.Name) ? string.Empty : $"{root.Name}=";
         writer.WriteLine($"root    {prefix}{root.AbsolutePath}");
     }
+
+    private static string FormatMatchPrefix(Match match)
+    {
+        if (match.Kind == SpanKind.Code)
+            return string.Empty;
+
+        var spanText = match.Span is { } span
+            ? span.StartLine == span.EndLine
+                ? $"line {span.StartLine}"
+                : $"lines {span.StartLine}-{span.EndLine}"
+            : "span ?";
+
+        return $"[{FormatSpanKind(match.Kind)}:{spanText}] ";
+    }
+
+    private static string FormatSpanKind(SpanKind kind) => kind switch
+    {
+        SpanKind.Code => "code",
+        SpanKind.Markdown => "markdown",
+        SpanKind.PlainText => "plain-text",
+        SpanKind.XmlDoc => "xml-doc",
+        SpanKind.LineCommentBlock => "line-comment-block",
+        SpanKind.BlockComment => "block-comment",
+        _ => kind.ToString(),
+    };
 }

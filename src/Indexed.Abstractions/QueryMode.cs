@@ -13,12 +13,12 @@ namespace Indexed.Abstractions;
 /// </para>
 /// <para>
 /// In <see cref="Code"/> mode, matches always carry <see cref="SpanKind.Code"/>
-/// and never carry a <see cref="MatchSpan"/>. <see cref="Prose"/> mode is not
-/// yet wired at Stage 2 and returns
-/// <see cref="IndexedErrorCode.NotImplemented"/>; it will become available once
-/// Stage 3 ships the prose extractor and span-kind tagging. At Stage 2,
-/// <see cref="Auto"/> (the DTO default) is executed as an alias of
-/// <see cref="Code"/> — Auto is not a merged/parallel plan at this stage.
+/// and never carry a <see cref="MatchSpan"/>. <see cref="Prose"/> mode queries
+/// extractor-produced spans (XML doc comments, comment blocks, Markdown,
+/// plain text) and returns their real <see cref="SpanKind"/> plus an enclosing
+/// <see cref="MatchSpan"/>. <see cref="Auto"/> runs both surfaces when both can
+/// contribute, then merges the results with prose preferred on exact
+/// <c>(path, line)</c> collisions.
 /// </para>
 /// <para>
 /// Wire format: kebab-case JSON strings (<c>"auto"</c>, <c>"code"</c>,
@@ -34,9 +34,10 @@ namespace Indexed.Abstractions;
 public enum QueryMode
 {
     /// <summary>
-    /// The DTO default. At Stage 2 this is served as an alias of
-    /// <see cref="Code"/>; Stage 3 will run both the code and prose plans
-    /// and merge the results.
+    /// The DTO default. Runs both code and prose plans when both are
+    /// meaningful for the request shape, then merges the results.
+    /// Regex queries run only the code side because prose search uses FTS5
+    /// match expressions rather than regex syntax.
     /// </summary>
     [JsonStringEnumMemberName("auto")]
     Auto = 0,
@@ -54,12 +55,6 @@ public enum QueryMode
     /// of <see cref="SearchRequest.CaseSensitive"/>. Matches carry their
     /// extracted <see cref="SpanKind"/> and <see cref="MatchSpan"/>.
     /// </summary>
-    /// <remarks>
-    /// Not implemented at Stage 2: a request with
-    /// <see cref="QueryMode.Prose"/> returns
-    /// <see cref="IndexedErrorCode.NotImplemented"/>. Callers should use
-    /// <see cref="Code"/> explicitly until the Stage 3 extractor ships.
-    /// </remarks>
     [JsonStringEnumMemberName("prose")]
     Prose = 2,
 }

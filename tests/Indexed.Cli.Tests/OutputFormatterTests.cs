@@ -64,6 +64,29 @@ public sealed class OutputFormatterTests
     }
 
     [Fact]
+    public void WriteSearchText_AnnotatesProseHitsWithKindAndSpan()
+    {
+        var response = new SearchResponse(
+            new Freshness(null, "abc", 0, null, false),
+            new[]
+            {
+                new Match(
+                    Path: "docs/readme.md", Line: 7, Column: 1, ByteOffset: 0,
+                    Text: "needle docs",
+                    Kind: SpanKind.Markdown,
+                    Span: new MatchSpan(6, 8),
+                    ContextBefore: Array.Empty<string>(),
+                    ContextAfter: Array.Empty<string>()),
+            },
+            Truncated: false, TotalMatches: 1, ElapsedMs: 0);
+
+        using var sw = new StringWriter();
+        OutputFormatter.WriteSearchText(sw, response);
+
+        Assert.Contains("[markdown:lines 6-8] docs/readme.md:7:1:needle docs", sw.ToString());
+    }
+
+    [Fact]
     public void WriteSearchJson_RoundTrips()
     {
         var response = new SearchResponse(

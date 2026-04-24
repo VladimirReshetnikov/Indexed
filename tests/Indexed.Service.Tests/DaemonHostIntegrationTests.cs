@@ -100,7 +100,8 @@ public sealed class DaemonHostIntegrationTests : IDisposable
 
             Assert.NotNull(status);
             Assert.True(status!.Freshness.IsStale);
-            Assert.Equal(12, status.RepoId.Length);
+            var repoId = Assert.IsType<string>(status.RepoId);
+            Assert.Equal(12, repoId.Length);
             Assert.Equal(host.Info.Pid, status.Pid);
         }
         finally
@@ -118,7 +119,8 @@ public sealed class DaemonHostIntegrationTests : IDisposable
                 new Freshness(null, null, 0, null, true), Array.Empty<Match>(), false, 0, 0))));
         try
         {
-            var appData = Path.Combine(_tempRoot, "appdata", host.Info.RepoId);
+            var repoId = Assert.IsType<string>(host.Info.RepoId);
+            var appData = Path.Combine(_tempRoot, "appdata", repoId);
             var daemonJson = Path.Combine(appData, "daemon.json");
 
             Assert.True(File.Exists(daemonJson));
@@ -345,6 +347,70 @@ public sealed class DaemonHostIntegrationTests : IDisposable
         }
     }
 
+    [Fact]
+    public async Task DefaultBackend_AnswersProseAndAutoSearchFromSqliteIndex()
+    {
+        var repo = NewRepoWithContent(new[]
+        {
+            ("hello.cs", "/// prose greeting\nclass Hello { int answer = 42; // auto marker }\n"),
+        });
+        var appData = Path.Combine(_tempRoot, "appdata-real-prose");
+        Directory.CreateDirectory(appData);
+
+        var host = new DaemonHost(new DaemonOptions
+        {
+            RepoRoot = repo,
+            AppDataBase = appData,
+            UseSingletonMutex = false,
+            IdleTimeout = TimeSpan.FromMinutes(5),
+        });
+
+        try
+        {
+            await host.StartAsync();
+            _ = host.RunAsync();
+
+            using var http = new HttpClient
+            {
+                BaseAddress = new Uri($"http://127.0.0.1:{host.Info.Port}/"),
+                Timeout = TimeSpan.FromSeconds(10),
+            };
+
+            using (var proseResp = await http.PostAsJsonAsync(
+                "search",
+                new SearchRequest("greeting", Mode: QueryMode.Prose),
+                IndexedJsonContext.Default.SearchRequest))
+            {
+                proseResp.EnsureSuccessStatusCode();
+                await using var proseStream = await proseResp.Content.ReadAsStreamAsync();
+                var proseBody = JsonSerializer.Deserialize(proseStream, IndexedJsonContext.Default.SearchResponse);
+                Assert.NotNull(proseBody);
+                var proseMatch = Assert.Single(proseBody!.Matches);
+                Assert.Equal("hello.cs", proseMatch.Path);
+                Assert.Equal(SpanKind.XmlDoc, proseMatch.Kind);
+            }
+
+            using (var autoResp = await http.PostAsJsonAsync(
+                "search",
+                new SearchRequest("marker", Mode: QueryMode.Auto),
+                IndexedJsonContext.Default.SearchRequest))
+            {
+                autoResp.EnsureSuccessStatusCode();
+                await using var autoStream = await autoResp.Content.ReadAsStreamAsync();
+                var autoBody = JsonSerializer.Deserialize(autoStream, IndexedJsonContext.Default.SearchResponse);
+                Assert.NotNull(autoBody);
+                var autoMatch = Assert.Single(autoBody!.Matches);
+                Assert.Equal("hello.cs", autoMatch.Path);
+                Assert.Equal(SpanKind.LineCommentBlock, autoMatch.Kind);
+                Assert.Equal(new MatchSpan(2, 2), autoMatch.Span);
+            }
+        }
+        finally
+        {
+            await host.DisposeAsync();
+        }
+    }
+
     private string NewRepoWithContent((string path, string content)[] files)
     {
         var path = Path.Combine(_tempRoot, "repo-" + Guid.NewGuid().ToString("N")[..8]);
@@ -394,7 +460,8 @@ public sealed class DaemonHostIntegrationTests : IDisposable
         var (host, http) = await StartHostAsync(new FakeBackend(SearchBackendResult.Ok(
             new SearchResponse(
                 new Freshness(null, null, 0, null, true), Array.Empty<Match>(), false, 0, 0))));
-        var daemonJson = Path.Combine(_tempRoot, "appdata", host.Info.RepoId, "daemon.json");
+        var repoId = Assert.IsType<string>(host.Info.RepoId);
+        var daemonJson = Path.Combine(_tempRoot, "appdata", repoId, "daemon.json");
         Assert.True(File.Exists(daemonJson));
 
         http.Dispose();

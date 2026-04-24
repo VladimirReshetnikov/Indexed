@@ -14,14 +14,12 @@ namespace Indexed.Abstractions;
 /// display it directly without re-reading the file.
 /// </para>
 /// <para>
-/// <see cref="ByteOffset"/> semantics (Stage 2 reality): the value is the
-/// 0-based <em>UTF-16 character offset</em> of the match within the decoded
-/// in-memory string, not the byte offset within the raw file. For pure-ASCII
-/// files the two coincide; for UTF-8 files containing non-ASCII characters
-/// the character offset is less than the byte offset, and for UTF-16 files
-/// they differ by a factor of two. The field is retained under its historical
-/// name for wire compatibility; Stage 3 plans a UTF-8 byte mapping that
-/// matches the documented name without a DTO break.
+/// <see cref="ByteOffset"/> is the 0-based UTF-8 byte offset of the match
+/// start within the materialized search surface used for that hit. For
+/// <see cref="SpanKind.Code"/> this is the working-tree file content decoded
+/// to text and re-encoded as UTF-8 for offset accounting. For prose hits it is
+/// the normalized extracted span content stored in <c>prose_fts</c>, not the
+/// raw byte offset inside the original source file.
 /// </para>
 /// <para>
 /// <see cref="Span"/> is populated when and only when <see cref="Kind"/> is
@@ -35,7 +33,9 @@ namespace Indexed.Abstractions;
 /// </para>
 /// </remarks>
 /// <param name="Path">
-/// Repository-relative POSIX path (forward slashes, no leading slash).
+/// Target-logical POSIX path (forward slashes, no leading slash). For git and
+/// single-root directory targets this is the root-relative path; for
+/// directory-set targets it is <c>label/relative/path</c>.
 /// </param>
 /// <param name="Line">1-based line number of the match.</param>
 /// <param name="Column">
@@ -44,9 +44,9 @@ namespace Indexed.Abstractions;
 /// conventions.
 /// </param>
 /// <param name="ByteOffset">
-/// 0-based UTF-16 character offset of <see cref="Text"/> in the decoded
-/// in-memory string. See the remarks section for the byte-vs-character
-/// caveat; the field name is historical.
+/// 0-based UTF-8 byte offset of the match start within the materialized search
+/// surface for this hit. See the remarks section for the code-vs-prose source
+/// distinction.
 /// </param>
 /// <param name="Text">
 /// The full line containing the match, trimmed of trailing line terminators.

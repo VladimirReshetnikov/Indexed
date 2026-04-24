@@ -142,6 +142,13 @@ The format is `path:line:column:text`. This is intentionally close to
 ripgrep's default so your eye already knows how to read it, and so shell
 pipelines that already consume `rg` output keep working.
 
+For prose hits, Indexed prefixes the line with the span kind and enclosing
+line range, for example:
+
+```text
+[xml-doc:lines 40-44] src/Indexed.Core/SqliteIndex.cs:42:8:Open or create the index database.
+```
+
 **Quoting.** Wrap your pattern in double quotes if it contains a space, a
 shell metacharacter, or anything you do not want the shell to expand. When
 in doubt, quote it.
@@ -212,6 +219,22 @@ idx find "fixme" --kind code
 
 `--kind` is repeatable; each occurrence **adds** to the set of allowed
 kinds. If you pass no `--kind` at all, every kind is allowed.
+
+If you want to search prose without searching code at all, switch the mode:
+
+```bash
+idx find "lifetime" --mode prose --kind xml-doc
+```
+
+And if you want the broadest "tell me everything relevant" pass, use:
+
+```bash
+idx find "DisposeAsync" --mode auto
+```
+
+`auto` runs both the code and prose engines and merges the results. When a code
+hit and a prose hit land on the exact same file and line, the prose hit wins so
+you keep the richer `kind` + `span` metadata.
 
 ### 4.3 Context lines
 
