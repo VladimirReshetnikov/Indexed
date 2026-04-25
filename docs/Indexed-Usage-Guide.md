@@ -1,7 +1,7 @@
 # Indexed — Usage Guide
 
 - Created (UTC): 2026-04-15T17:00:00Z
-- Updated (UTC): 2026-04-25T21:34:59Z
+- Updated (UTC): 2026-04-25T22:44:28Z
 - Repository HEAD: 6b75c7c68d5467d8952993deb0e2161e59058d77
 
 ## 1. Overview
@@ -142,6 +142,7 @@ idx find <pattern> [--mode auto|code|prose]
                    [--context | -C <n>]
                    [--max-matches <n>]
                    [--max-matches-per-file <n>]
+                   [--timeout-ms <n>]
                    [--json]
                    [--repo-root <dir>]
                    [--root <dir>|<label=dir>]...
@@ -170,6 +171,7 @@ idx find <pattern> [--mode auto|code|prose]
 | `-C`, `--context` | 0 | Symmetric context (sets both before and after). |
 | `--max-matches` | 200 | Global maximum number of matches returned. Hard cap: 10,000. |
 | `--max-matches-per-file` | 20 | Maximum matches per file. |
+| `--timeout-ms` | 10,000 | Query timeout in milliseconds. Hard cap: 30,000. |
 | `--json` | off | Emit raw JSON `SearchResponse` instead of text output. |
 | `--repo-root` | cwd | Override repository root detection (git mode only). |
 | `--root` | none | Select a directory target. One bare path creates a `directory-tree`; repeated `LABEL=PATH` forms create a `directory-set`. |
@@ -196,6 +198,9 @@ idx find "DisposeAsync" --mode auto
 
 # Search with context lines
 idx find "Dispose" -C 3
+
+# Give a broad corpus query a larger budget
+idx find "SparseArray" --mode code --timeout-ms 30000
 
 # JSON output for agent consumption
 idx find "BuildFreshness" --json
@@ -398,7 +403,7 @@ Execute a search query.
   "contextAfter": 2,
   "maxMatches": 200,
   "maxMatchesPerFile": 20,
-  "timeoutMs": 2000
+  "timeoutMs": 10000
 }
 ```
 
@@ -418,7 +423,7 @@ All fields except `pattern` are optional:
 | `maxMatches` | 200 | Global cap (hard max: 10,000) |
 | `maxMatchesPerFile` | 20 | Per-file cap |
 | `sortBy` | `"path"` | `"path"` (lex by path/line/col) or `"relevance"` (BM25 for prose) |
-| `timeoutMs` | 2000 | Query timeout in milliseconds (hard cap: 30,000) |
+| `timeoutMs` | 10,000 | Query timeout in milliseconds (hard cap: 30,000) |
 
 **Response (200):**
 
@@ -801,7 +806,9 @@ Indexed uses gitignore-style glob patterns for `--glob`, `--exclude`, `--include
 | `*` | Any sequence of non-slash characters |
 | `**` | Any path segment (zero or more directories) |
 | `?` | Any single character |
+| `{cs,vb}` | Brace alternation: either `cs` or `vb` |
 | `src/**/*.cs` | All `.cs` files under `src/` |
+| `**/*.{wl,m,wlt,mt}` | Wolfram source and test files across any directory depth |
 | `**/tests/**` | Any path containing a `tests/` directory |
 | `*.min.js` | Files ending in `.min.js` |
 

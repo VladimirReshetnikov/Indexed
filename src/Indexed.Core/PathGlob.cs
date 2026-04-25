@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Text;
 using System.Text.RegularExpressions;
 
@@ -8,7 +9,8 @@ namespace Indexed.Core;
 /// Glob-to-regex translator used to filter candidate file paths in the query
 /// executor. Supports the subset of gitignore/rsync glob syntax the search
 /// API advertises: <c>*</c> (any chars but <c>/</c>), <c>**</c> (any path),
-/// <c>?</c> (single char), and literal characters.
+/// <c>?</c> (single char), <c>{a,b}</c> brace alternation, and literal
+/// characters.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -21,6 +23,7 @@ namespace Indexed.Core;
 ///   <item><description><c>**/*.cs</c> matches any <c>.cs</c> file at any depth.</description></item>
 ///   <item><description><c>src/**</c> matches everything under <c>src</c>.</description></item>
 ///   <item><description><c>foo?bar.txt</c> matches <c>fooXbar.txt</c> (exactly one char between).</description></item>
+///   <item><description><c>**/*.{cs,vb}</c> matches either extension.</description></item>
 /// </list>
 /// <para>
 /// Comparison is case-insensitive on Windows, case-sensitive elsewhere —
@@ -54,6 +57,13 @@ public static class PathGlob
     {
         var sb = new StringBuilder();
         sb.Append('^');
+        AppendGlobRegex(sb, glob);
+        sb.Append('$');
+        return sb.ToString();
+    }
+
+    private static void AppendGlobRegex(StringBuilder sb, string glob)
+    {
         var i = 0;
         while (i < glob.Length)
         {
@@ -87,6 +97,18 @@ public static class PathGlob
                 sb.Append("[^/]");
                 i++;
             }
+            else if (c == '{' && TryReadBraceAlternation(glob, i, out var alternatives, out var end))
+            {
+                sb.Append("(?:");
+                for (var alt = 0; alt < alternatives.Count; alt++)
+                {
+                    if (alt > 0)
+                        sb.Append('|');
+                    AppendGlobRegex(sb, alternatives[alt]);
+                }
+                sb.Append(')');
+                i = end + 1;
+            }
             else if ("+()^$.{}[]|\\".IndexOf(c) >= 0)
             {
                 sb.Append('\\').Append(c);
@@ -98,8 +120,70 @@ public static class PathGlob
                 i++;
             }
         }
-        sb.Append('$');
-        return sb.ToString();
+    }
+
+    private static bool TryReadBraceAlternation(
+        string glob,
+        int openBrace,
+        out IReadOnlyList<string> alternatives,
+        out int closeBrace)
+    {
+        var depth = 0;
+        closeBrace = -1;
+        var hasComma = false;
+        for (var i = openBrace + 1; i < glob.Length; i++)
+        {
+            switch (glob[i])
+            {
+                case '{':
+                    depth++;
+                    break;
+                case '}':
+                    if (depth == 0)
+                    {
+                        closeBrace = i;
+                        i = glob.Length;
+                    }
+                    else
+                    {
+                        depth--;
+                    }
+                    break;
+                case ',' when depth == 0:
+                    hasComma = true;
+                    break;
+            }
+        }
+
+        if (closeBrace < 0 || !hasComma)
+        {
+            alternatives = Array.Empty<string>();
+            return false;
+        }
+
+        var result = new List<string>();
+        var start = openBrace + 1;
+        depth = 0;
+        for (var i = start; i < closeBrace; i++)
+        {
+            switch (glob[i])
+            {
+                case '{':
+                    depth++;
+                    break;
+                case '}':
+                    depth--;
+                    break;
+                case ',' when depth == 0:
+                    result.Add(glob[start..i]);
+                    start = i + 1;
+                    break;
+            }
+        }
+
+        result.Add(glob[start..closeBrace]);
+        alternatives = result;
+        return true;
     }
 
     /// <summary>Return true when the path matches the glob.</summary>

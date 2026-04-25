@@ -106,4 +106,4 @@ public sealed record SearchRequest(
     int MaxMatches = 200,
     int MaxMatchesPerFile = 20,
     SortBy SortBy = SortBy.Path,
-    int TimeoutMs = 2000);
+    int TimeoutMs = 10000);

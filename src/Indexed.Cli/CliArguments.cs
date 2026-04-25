@@ -52,6 +52,9 @@ public sealed record CliArguments
     /// <summary>Per-file match cap.</summary>
     public int MaxMatchesPerFile { get; init; } = 20;
 
+    /// <summary>Search request timeout in milliseconds.</summary>
+    public int TimeoutMs { get; init; } = 10000;
+
     /// <summary>Emit raw JSON instead of ripgrep-style text.</summary>
     public bool EmitJson { get; init; }
 

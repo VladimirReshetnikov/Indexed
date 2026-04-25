@@ -70,6 +70,7 @@ public sealed class ArgumentParserTests
         Assert.Null(r.IdleTimeoutSeconds);
         Assert.Equal(200, r.MaxMatches);
         Assert.Equal(20, r.MaxMatchesPerFile);
+        Assert.Equal(10000, r.TimeoutMs);
     }
 
     [Theory]
@@ -272,11 +273,28 @@ public sealed class ArgumentParserTests
     }
 
     [Fact]
+    public void Find_TimeoutMs_Parsed()
+    {
+        var r = ArgumentParser.Parse(new[] { "find", "p", "--timeout-ms", "30000" });
+
+        Assert.Equal(CliCommand.Find, r.Command);
+        Assert.Equal(30000, r.TimeoutMs);
+    }
+
+    [Fact]
     public void Find_NonIntegerValue_RendersDiagnostic()
     {
         var r = ArgumentParser.Parse(new[] { "find", "p", "--max-matches", "x" });
         Assert.Equal(CliCommand.Help, r.Command);
         Assert.Contains("--max-matches", r.Diagnostic);
+    }
+
+    [Fact]
+    public void Find_TimeoutMs_NonInteger_RendersDiagnostic()
+    {
+        var r = ArgumentParser.Parse(new[] { "find", "p", "--timeout-ms", "x" });
+        Assert.Equal(CliCommand.Help, r.Command);
+        Assert.Contains("--timeout-ms", r.Diagnostic);
     }
 
     [Fact]

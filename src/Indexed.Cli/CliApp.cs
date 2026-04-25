@@ -111,7 +111,8 @@ internal static class CliApp
             ContextBefore: args.ContextBefore,
             ContextAfter: args.ContextAfter,
             MaxMatches: args.MaxMatches,
-            MaxMatchesPerFile: args.MaxMatchesPerFile);
+            MaxMatchesPerFile: args.MaxMatchesPerFile,
+            TimeoutMs: args.TimeoutMs);
 
         var (ok, err) = await client.SearchAsync(request, ct).ConfigureAwait(false);
         if (err is not null)

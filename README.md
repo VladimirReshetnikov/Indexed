@@ -3,7 +3,7 @@
 Background-indexed full-text search service for a local workspace target, aimed primarily at AI coding agents that need millisecond-class code search across a git repository, a standalone directory tree, or an explicit multi-directory workspace.
 
 - Created (UTC): 2026-04-15T17:00:00Z
-- Updated (UTC): 2026-04-25T21:34:59Z
+- Updated (UTC): 2026-04-25T22:44:28Z
 - Repository HEAD: 6b75c7c68d5467d8952993deb0e2161e59058d77
 
 ## Project goals

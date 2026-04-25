@@ -1,8 +1,8 @@
 # Indexed — Architecture
 
 - Created (UTC): 2026-04-15T17:00:00Z
-- Updated (UTC): 2026-04-25T20:46:08Z
-- Repository HEAD: beeccd1b652dd32394ba3e4f6128a8a3c30abf9a
+- Updated (UTC): 2026-04-25T22:44:28Z
+- Repository HEAD: 6b75c7c68d5467d8952993deb0e2161e59058d77
 - Status: Current-state architecture for the Indexed full-text search service. Covers Stages 0–5 as implemented, including prose extraction and truthful `auto` mode.
 
 ## 1. System overview
@@ -358,7 +358,7 @@ A Russ Cox-style analyzer in four components:
 5. Run the compiled `Regex` (regex mode) or `string.IndexOf` (literal mode) against the live on-disk content.
 6. Extract line, column, byte offset, context lines via `MatchExtraction`.
 7. Apply per-file cap (`maxMatchesPerFile`, default 20) and global cap (`maxMatches`, default 200).
-8. Enforce timeout (`timeoutMs`, default 2000 ms).
+8. Enforce timeout (`timeoutMs`, default 10000 ms).
 
 The FTS5 posting list is a *candidate oracle*, not the source of truth for match text. Three staleness classes are bounded:
 

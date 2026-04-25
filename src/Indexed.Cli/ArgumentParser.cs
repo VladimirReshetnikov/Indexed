@@ -24,6 +24,7 @@ namespace Indexed.Cli;
 ///                    [--glob &lt;g&gt;] [--exclude &lt;g&gt;]* [--kind &lt;k&gt;]*
 ///                    [--context-before N] [--context-after N] [-C N]
 ///                    [--max-matches N] [--max-matches-per-file N]
+///                    [--timeout-ms N]
 ///                    [--json] [--repo-root &lt;dir&gt;] [--root &lt;dir&gt;|&lt;label=dir&gt;]...
 ///                    [--include-index &lt;g&gt;]* [--exclude-index &lt;g&gt;]*
 ///                    [--max-indexable-file-mb N|--max-indexable-file-bytes N]
@@ -74,6 +75,7 @@ public static class ArgumentParser
         var contextAfter = 0;
         var maxMatches = 200;
         var maxMatchesPerFile = 20;
+        var timeoutMs = 10000;
         var emitJson = false;
         string? repoRoot = null;
         List<string>? rootArgs = null;
@@ -159,6 +161,9 @@ public static class ArgumentParser
                     case "--max-matches-per-file":
                         maxMatchesPerFile = ParseInt(TakeArg(ref i, a)!, a);
                         break;
+                    case "--timeout-ms":
+                        timeoutMs = ParseInt(TakeArg(ref i, a)!, a);
+                        break;
                     case "--json":
                         emitJson = true;
                         break;
@@ -217,6 +222,7 @@ public static class ArgumentParser
                 contextAfter,
                 maxMatches,
                 maxMatchesPerFile,
+                timeoutMs,
                 repoRoot,
                 roots,
                 idleTimeoutSeconds,
@@ -242,6 +248,7 @@ public static class ArgumentParser
                 ContextAfter = contextAfter,
                 MaxMatches = maxMatches,
                 MaxMatchesPerFile = maxMatchesPerFile,
+                TimeoutMs = timeoutMs,
                 EmitJson = emitJson,
                 RepoRoot = repoRoot,
                 Roots = roots,
@@ -345,6 +352,7 @@ public static class ArgumentParser
         int contextAfter,
         int maxMatches,
         int maxMatchesPerFile,
+        int timeoutMs,
         string? repoRoot,
         IReadOnlyList<TargetRootSpec>? roots,
         int? idleTimeoutSeconds,
@@ -371,6 +379,7 @@ public static class ArgumentParser
             || contextAfter != 0
             || maxMatches != 200
             || maxMatchesPerFile != 20
+            || timeoutMs != 10000
             || repoRoot is not null
             || roots is { Count: > 0 }
             || idleTimeoutSeconds is not null;
@@ -406,6 +415,7 @@ public static class ArgumentParser
           --context, -C <n>             symmetric context
           --max-matches <n>             global cap (default 200)
           --max-matches-per-file <n>    per-file cap (default 20)
+          --timeout-ms <n>              request timeout in milliseconds (default 10000)
           --json                        emit raw JSON response
 
         daemon launch options:

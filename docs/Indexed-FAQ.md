@@ -1,6 +1,7 @@
 # Indexed - FAQ
 
 - Created (UTC): 2026-04-25T21:34:59Z
+- Updated (UTC): 2026-04-25T22:44:28Z
 - Repository HEAD: 6b75c7c68d5467d8952993deb0e2161e59058d77
 
 This document collects short answers to operational questions that tend to
@@ -82,3 +83,24 @@ idx status --root C:\TestData\wolfram --index-updates manual --json |
 
 The scan is complete when `initialScanInProgress` is `false`,
 `isStale` is `false`, and `pendingFileCount` is `0`.
+
+## Query Behavior
+
+### What is the search timeout for?
+
+The timeout bounds one search request so a broad query, expensive regex, or
+catastrophically-backtracking pattern cannot tie up the daemon indefinitely.
+When the budget elapses, the daemon returns `timeout-exceeded` instead of
+partial matches.
+
+The default CLI and HTTP timeout is 10,000 ms, with a hard service cap of
+30,000 ms. Use `--timeout-ms` when a deliberately broad corpus query needs a
+larger budget:
+
+```powershell
+idx find "SparseArray" --mode auto --timeout-ms 30000
+```
+
+Prefer narrowing with `--mode code`, `--glob`, `--max-matches`, and
+`--max-matches-per-file` before increasing the timeout; tighter queries keep
+the daemon responsive and usually produce more useful result sets.

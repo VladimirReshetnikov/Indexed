@@ -24,6 +24,15 @@ public sealed class PathGlobTests
     [InlineData("a/**/b", "a/b", true)]
     [InlineData("a/**/b", "a/x/b", true)]
     [InlineData("a/**/b", "a/x/y/b", true)]
+    [InlineData("**/*.{wlt,mt}", "tests/example.wlt", true)]
+    [InlineData("**/*.{wlt,mt}", "tests/example.mt", true)]
+    [InlineData("**/*.{wlt,mt}", "tests/example.wl", false)]
+    [InlineData("src/{main,test}/**/*.cs", "src/main/a.cs", true)]
+    [InlineData("src/{main,test}/**/*.cs", "src/test/a.cs", true)]
+    [InlineData("src/{main,test}/**/*.cs", "src/docs/a.cs", false)]
+    [InlineData("*.{cs,vb}", "foo.cs", true)]
+    [InlineData("*.{cs,vb}", "foo.vb", true)]
+    [InlineData("*.{cs,vb}", "foo.fs", false)]
     public void Matches_FollowsGitIgnoreSemantics(string glob, string path, bool expected)
     {
         Assert.Equal(expected, PathGlob.Matches(glob, path));
@@ -40,5 +49,13 @@ public sealed class PathGlobTests
     {
         Assert.True(PathGlob.Matches("a+b.txt", "a+b.txt"));
         Assert.False(PathGlob.Matches("a+b.txt", "aab.txt"));
+    }
+
+    [Fact]
+    public void MalformedOrSingleItemBracesAreLiteral()
+    {
+        Assert.True(PathGlob.Matches("file.{cs}", "file.{cs}"));
+        Assert.False(PathGlob.Matches("file.{cs}", "file.cs"));
+        Assert.True(PathGlob.Matches("file.{cs", "file.{cs"));
     }
 }

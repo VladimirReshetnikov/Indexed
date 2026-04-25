@@ -1,7 +1,7 @@
 # Indexed — Tutorial
 
 - Created (UTC): 2026-04-16T19:14:30Z
-- Updated (UTC): 2026-04-25T21:34:59Z
+- Updated (UTC): 2026-04-25T22:44:28Z
 - Repository HEAD: 6b75c7c68d5467d8952993deb0e2161e59058d77
 
 This tutorial is a **learning-oriented walkthrough** for humans who want to use
@@ -193,6 +193,7 @@ Most searches benefit from a path-shape filter. Use `--glob` (or `-g`):
 idx find "Dispose" --glob "src/**/*.cs"
 idx find "TODO"    --glob "**/*.md"
 idx find "import"  --glob "src/**/*.{ts,tsx}"
+idx find "VerificationTest" --glob "**/*.{wlt,mt}"
 ```
 
 The glob syntax is gitignore-style:
@@ -200,6 +201,7 @@ The glob syntax is gitignore-style:
 - `*` — any run of non-slash characters
 - `**` — any run of directory components (or none)
 - `?` — exactly one character
+- `{a,b}` — either alternative; useful for extension sets like `**/*.{wl,m}`
 
 On Windows, globs are case-insensitive; paths in queries and output are
 normalized to forward slashes so your patterns stay portable.
@@ -292,8 +294,8 @@ idx find -e "^\s*[A-Z][a-z]+Service$" -s
 ```
 
 **Regex timeouts.** Indexed compiles your regex with a `MatchTimeout`
-that tracks the request's `--timeoutMs` (default 2000). A
-catastrophically-backtracking pattern will fail fast with a
+that tracks the request's `--timeout-ms` budget (default 10,000 ms; hard cap
+30,000 ms). A catastrophically-backtracking pattern will fail fast with a
 `timeout-exceeded` error rather than hang the daemon.
 
 ## 6. Managing the daemon day-to-day
@@ -574,9 +576,8 @@ The daemon could not be reached or launched.
 
 A pattern like `(a+)+b` can backtrack catastrophically on adversarial
 input. Indexed's compiled regex has a per-match timeout that you can tune
-with `--timeoutMs` (via the JSON API) or by passing a shorter
-`--max-matches` budget. Rewriting the pattern to avoid nested quantifiers
-is the real fix.
+with `--timeout-ms` or by passing a shorter `--max-matches` budget. Rewriting
+the pattern to avoid nested quantifiers is the real fix.
 
 ### 11.5 Disk usage is surprising
 

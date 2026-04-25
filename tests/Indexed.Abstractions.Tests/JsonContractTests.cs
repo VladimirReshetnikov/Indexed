@@ -46,7 +46,7 @@ public sealed class JsonContractTests
         Assert.Equal(200, request.MaxMatches);
         Assert.Equal(20, request.MaxMatchesPerFile);
         Assert.Equal(SortBy.Path, request.SortBy);
-        Assert.Equal(2000, request.TimeoutMs);
+        Assert.Equal(10000, request.TimeoutMs);
     }
 
     [Fact]
