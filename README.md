@@ -3,8 +3,8 @@
 Background-indexed full-text search service for a local workspace target, aimed primarily at AI coding agents that need millisecond-class code search across a git repository, a standalone directory tree, or an explicit multi-directory workspace.
 
 - Created (UTC): 2026-04-15T17:00:00Z
-- Updated (UTC): 2026-04-25T20:46:08Z
-- Repository HEAD: beeccd1b652dd32394ba3e4f6128a8a3c30abf9a
+- Updated (UTC): 2026-04-25T21:34:59Z
+- Repository HEAD: 6b75c7c68d5467d8952993deb0e2161e59058d77
 
 ## Project goals
 
@@ -75,6 +75,7 @@ src/Indexed/
     README.md
     docs/
         Indexed-Architecture.md
+        Indexed-FAQ.md
         Indexed-Workspace-Targets-Proposal.md
         Indexed-Tutorial.md
         Indexed-Usage-Guide.md
@@ -147,7 +148,7 @@ daemon into the same directory and add it to `PATH`:
 
 ```bash
 cd src/Indexed
-$dest = "$env:LOCALAPPDATA\\Indexed\\bin"
+$dest = "$env:LOCALAPPDATA\\Programs\\Indexed"
 dotnet publish src/Indexed.Cli -c Release -o $dest
 dotnet publish src/Indexed.Service -c Release -o $dest
 ```
@@ -160,6 +161,7 @@ you cannot publish side-by-side, set `INDEXED_SERVICE_EXE` to the full path of
 
 - [Tutorial](docs/Indexed-Tutorial.md) — learning-oriented walkthrough for humans; read this first.
 - [Usage guide](docs/Indexed-Usage-Guide.md) — CLI reference, HTTP API, configuration, data directory layout, troubleshooting.
+- [FAQ](docs/Indexed-FAQ.md) — short answers for common operational questions about target identity, status output, and freshness.
 - [Architecture](docs/Indexed-Architecture.md) — current-state architecture, layer ownership, data flow, concurrency model, failure handling.
 - [Workspace targets proposal](docs/Indexed-Workspace-Targets-Proposal.md) — design record for the target model that now backs git, directory-tree, and directory-set indexing.
 - [Proposed improvements](docs/Indexed-Proposed-Improvements__b8e57a4a6c7f.md) — prioritized next-step recommendations after workspace-target support landed.

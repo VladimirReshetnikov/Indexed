@@ -1,7 +1,8 @@
 # Indexed — Tutorial
 
 - Created (UTC): 2026-04-16T19:14:30Z
-- Repository HEAD: bd61955fe5079ea3a4b6bd8a5f64628ddc5fd9fc
+- Updated (UTC): 2026-04-25T21:34:59Z
+- Repository HEAD: 6b75c7c68d5467d8952993deb0e2161e59058d77
 
 This tutorial is a **learning-oriented walkthrough** for humans who want to use
 Indexed to search their own repositories. It is deliberately narrative and
@@ -78,6 +79,9 @@ idx status
 
 # Directory mode: from anywhere, with an explicit root
 idx status --root C:\path\to\your\workspace
+
+# Directory mode for a static or externally controlled corpus
+idx status --root C:\path\to\your\corpus --index-updates manual
 ```
 
 On first use you will see a short pause (a few seconds on a small repo, up to
@@ -85,7 +89,9 @@ a couple of minutes on a hundred-thousand-file repo). Under the hood:
 
 1. `idx` resolves a target and computes a stable **target ID** for it.
    Default git mode keeps the legacy `repoId` behavior; explicit directory
-   targets use a canonical target-spec hash.
+   targets use a canonical target-spec hash. Index-time settings such as
+   `--index-updates manual`, include/exclude globs, and file-size caps are
+   part of that identity.
 2. It looks for `%LOCALAPPDATA%\Indexed\<targetId>\daemon.json`. Not finding
    one, it launches the daemon.
 3. The daemon enumerates the target's files:
@@ -94,7 +100,8 @@ a couple of minutes on a hundred-thousand-file repo). Under the hood:
      directory or directories.
    It classifies each candidate as code, prose, or binary, and builds the
    trigram index in `index.db`.
-4. When indexing finishes, `idx status` returns.
+4. The daemon serves `idx status` while the scan is running. During that window
+   status reports `initial-scan` and `freshness.isStale=true`.
 
 Expected output after the first run:
 
@@ -113,13 +120,16 @@ recon   2026-04-16T19:14:42.0000000+00:00
 
 Key things to notice:
 
-- **`head` matches `indexed`**. That means the index is fully caught up.
+- **`current` matches `indexed` on git targets**. That means the index is
+  caught up to the tracked revision. Directory targets have no revision token
+  and show `rev kind=None current=?, indexed=?` instead.
 - **`stale` is `no`**. Any query you run right now will return fresh results.
 - **`pending` is 0**. No edits are queued for re-indexing.
 
-If `pending` is non-zero or `stale` is `yes`, give it a moment and re-run
-`idx status`. The daemon typically clears the backlog in a few seconds on
-everything but the largest initial scans.
+If `initial-scan` is present, or if `pending` is non-zero or `stale` is `yes`,
+give it a moment and re-run `idx status`. Indexed currently reports files
+processed so far, not a percentage, because the status contract does not expose
+a total scan denominator.
 
 ## 3. Your first searches
 
@@ -305,6 +315,11 @@ Use it when:
 - You are about to run an important query and want to confirm
   `stale: no`.
 
+Use the same target-defining options for status that you used to start the
+daemon. For example, a manual-mode directory target should be checked with
+`idx status --root C:\path\to\corpus --index-updates manual`; omitting
+`--index-updates manual` selects the default live-mode target variant.
+
 ### 6.2 `idx rescan` — force reconciliation
 
 ```bash
@@ -438,7 +453,8 @@ Read them like this:
 
 - **`indexedHead` vs. `currentHead`.** If they differ, HEAD has moved
   (commit, branch switch, rebase) and the daemon has not finished
-  processing the delta yet. Give it a second or two.
+  processing the delta yet. Directory targets usually have null revision
+  tokens, displayed in text status as `rev kind=None current=?, indexed=?`.
 - **`pendingFileCount`.** Non-zero means the file-system watcher has
   enqueued edits that are still being processed. On a typical edit burst
   this drops to zero within 100–500 ms.
@@ -450,6 +466,12 @@ Read them like this:
 Freshness is **advisory**, not a promise. A `stale: no` response reflects
 the moment the query ran; edits landing after that are still picked up
 for the next query.
+
+Initial full scans also make the index stale until they complete. In JSON,
+that state is reported as `index.initialScanInProgress=true`; in text output,
+the `files` line includes `initial-scan`. The `indexed` and `skipped` counts
+show progress in processed-file counts, but Indexed does not currently report a
+percentage.
 
 ## 9. JSON output for scripts and agents
 
@@ -495,6 +517,8 @@ Common patterns:
   its directory.
 - A single directory tree selected with `--root C:\src\scratch` gets its own
   target.
+- The same directory tree selected with different index-time settings, such as
+  live vs. manual update mode, gets separate target ids and separate indexes.
 - A labeled multi-root workspace such as
   `--root core=C:\src\proj\src --root docs=C:\src\proj\docs` gets a stable
   `directory-set` target whose logical paths are `core/...` and `docs/...`.
@@ -530,7 +554,8 @@ The daemon could not be reached or launched.
 `idx status` says `stale: yes` persistently and `pending` never reaches 0.
 
 1. Is the initial scan still running? For a large repo this can take
-   minutes. `last scan` gives you a timestamp.
+   a substantial amount of indexing work. The `files indexed=... skipped=...`
+   counters show processed files, but no percentage is currently reported.
 2. Did something externally overwrite half the working tree (rebase, bulk
    sync, partial checkout)? Run `idx rescan` and watch `pending` drain.
 3. As a last resort: `idx stop`, delete the `index.db*` files in the target's
@@ -585,6 +610,8 @@ step is ever required.
 
 - [`Indexed-Usage-Guide.md`](./Indexed-Usage-Guide.md) — the reference
   companion to this tutorial. Every flag, every field, every endpoint.
+- [`Indexed-FAQ.md`](./Indexed-FAQ.md) — quick answers for common status,
+  freshness, and target-identity questions.
 - [`Indexed-Architecture.md`](./Indexed-Architecture.md) — how the
   daemon, indexer, and query planner fit together. Read this if you want
   to understand *why* Indexed behaves the way it does under

@@ -1,8 +1,8 @@
 # Indexed — Usage Guide
 
 - Created (UTC): 2026-04-15T17:00:00Z
-- Updated (UTC): 2026-04-25T20:46:08Z
-- Repository HEAD: beeccd1b652dd32394ba3e4f6128a8a3c30abf9a
+- Updated (UTC): 2026-04-25T21:34:59Z
+- Repository HEAD: 6b75c7c68d5467d8952993deb0e2161e59058d77
 
 ## 1. Overview
 
@@ -54,7 +54,7 @@ publish **both** the CLI and the daemon into the same directory and add it to
 
 ```bash
 cd src/Indexed
-$dest = "$env:LOCALAPPDATA\\Indexed\\bin"
+$dest = "$env:LOCALAPPDATA\\Programs\\Indexed"
 dotnet publish src/Indexed.Cli -c Release -o $dest
 dotnet publish src/Indexed.Service -c Release -o $dest
 ```
@@ -93,6 +93,9 @@ idx --help
 These options can be passed to **any** verb. They only take effect when that
 invocation launches a new daemon; if an existing daemon is adopted via
 `daemon.json`, the already-running daemon's settings remain in effect.
+They also participate in the target id where noted in §5.2, so a status-only
+command must repeat non-default target-defining settings when it wants to
+address that exact daemon/index rather than the default variant.
 
 - `--include-index <glob>` (repeatable)
 - `--exclude-index <glob>` (repeatable)
@@ -110,6 +113,12 @@ invocation launches a new daemon; if an existing daemon is adopted via
 - One `--root <dir>`: serve a `directory-tree` target rooted at that directory.
 - Two or more `--root <label=dir>` flags: serve a `directory-set` target with logical paths in the form `label/relative/path`.
 - `--repo-root` and `--root` are mutually exclusive.
+
+Target-defining daemon options are part of identity. For example,
+`idx status --root C:\corpus --index-updates manual` and
+`idx status --root C:\corpus` address different targets because the second
+command defaults to live updates. Use `idx daemons` to list running descriptors
+without selecting a target.
 
 ### 2.2 `idx find`
 
@@ -251,6 +260,18 @@ files   indexed=12403 skipped=2 maxFileBytes=52428800 updates=Live
 skips   too_large=2
 recon   2026-04-15T10:05:00.0000000+00:00
 ```
+
+The `rev` line reports revision-tracker freshness. Git targets show the
+current and indexed HEAD-like tokens. Plain directory targets have no inherent
+revision token, so they print `kind=None current=?, indexed=?`; for those
+targets, staleness comes from initial scans, pending/in-flight index work, or
+reported indexer errors rather than a revision mismatch.
+
+During an initial full scan, the `files` line includes `initial-scan` and the
+freshness note says that the scan is still running. Indexed reports the number
+of files already `indexed` and `skipped`, but it does not currently expose a
+total denominator or percentage. Treat the scan as complete when
+`initial-scan` disappears, `stale False`, and `pending=0`.
 
 ### 2.4 `idx rescan`
 
@@ -483,7 +504,7 @@ Every response includes a `freshness` block. Recommended agent workflow:
 2. Check `freshness.isStale`. If `true` and the result quality matters, retry after a short delay.
 3. If `index.initialScanInProgress` is `true`, the daemon is still building the first full snapshot.
 4. If `pendingFileCount > 0`, the index is still catching up to recent edits.
-5. If `indexedHead != currentHead`, a HEAD change (branch switch, commit) has not been fully processed yet.
+5. If `indexedHead != currentHead` on a revision-tracked target, a HEAD change (branch switch, commit) has not been fully processed yet. Directory targets normally have null revision tokens.
 
 ### 4.3 Example: Claude Code integration
 
@@ -584,10 +605,17 @@ or docs-only targets:
 idx status --root C:\src\workspace --include-index "src/**/*.cs" --include-index "tests/**/*.cs"
 ```
 
-Index-time include/exclude settings, the file-size cap, and the update mode
-participate in the target id. Starting the same root with a different include
-set, exclude set, default-exclude policy, file-size cap, or update mode creates
-a different target directory under `%LOCALAPPDATA%\Indexed`.
+Index-time include/exclude settings, the file-size cap, the default-exclude
+policy, the directory-default-exclude policy, and the update mode participate
+in the target id. Starting the same root with a different include set, exclude
+set, default-exclude policy, file-size cap, or update mode creates a different
+target directory under `%LOCALAPPDATA%\Indexed`.
+
+This identity rule applies even to `status`, `rescan`, and `stop`, because
+those commands must know which target directory to probe. If a static corpus was
+started with `--index-updates manual`, keep passing `--index-updates manual`
+when checking status or running queries for that corpus. Omitting the flag
+selects the default live-update variant instead.
 
 ### 5.3 Update modes
 
@@ -600,6 +628,10 @@ The daemon still performs the initial full scan when the index is empty, and
 `idx rescan` / `POST /rescan` still enqueue an explicit reconciliation pass.
 This is useful for static corpora, generated snapshots, or directories whose
 changes are controlled by an external workflow.
+
+Manual mode does not mean "never index." It means "index on startup if the
+index is empty, and after explicit rescans only." During the first startup scan,
+status reports `index.initialScanInProgress=true` / `initial-scan`.
 
 ### 5.4 Directory-mode default excludes
 
