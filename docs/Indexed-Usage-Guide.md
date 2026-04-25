@@ -1,8 +1,8 @@
 # Indexed — Usage Guide
 
 - Created (UTC): 2026-04-15T17:00:00Z
-- Updated (UTC): 2026-04-25T20:12:31Z
-- Repository HEAD: 8d573b569cd63e77dea836599ba58819022d3074
+- Updated (UTC): 2026-04-25T20:46:08Z
+- Repository HEAD: beeccd1b652dd32394ba3e4f6128a8a3c30abf9a
 
 ## 1. Overview
 
@@ -98,6 +98,8 @@ invocation launches a new daemon; if an existing daemon is adopted via
 - `--exclude-index <glob>` (repeatable)
 - `--max-indexable-file-mb <n>`
 - `--max-indexable-file-bytes <n>`
+- `--index-updates <live|manual>`
+- `--manual-index-updates`
 - `--no-default-excludes`
 - `--no-default-directory-excludes` (directory targets only)
 - `--idle-timeout-seconds <n>`
@@ -123,6 +125,7 @@ idx find <pattern> [--mode auto|code|prose]
                    [--exclude-index <glob>]*
                    [--max-indexable-file-mb <n>]
                    [--max-indexable-file-bytes <n>]
+                   [--index-updates <live|manual>]
                    [--no-default-excludes]
                    [--kind <kind>]*
                    [--context-before | -B <n>]
@@ -149,6 +152,8 @@ idx find <pattern> [--mode auto|code|prose]
 | `--exclude-index` | none | Exclude files from indexing entirely. Repeatable. Passed to the daemon at launch. |
 | `--max-indexable-file-mb` | 50 | Maximum file size accepted into the index, in MiB. Passed to the daemon at launch. |
 | `--max-indexable-file-bytes` | 52,428,800 | Exact byte form of the same daemon launch setting. |
+| `--index-updates` | `live` | Update policy. `live` starts filesystem/revision watchers and periodic reconciliation. `manual` disables automatic post-start update sources; use `idx rescan` to refresh. |
+| `--manual-index-updates` | off | Shorthand for `--index-updates manual`. |
 | `--no-default-excludes` | off | Do not apply the built-in default exclude list (lockfiles, minified bundles, generated C#). See §5.2 for the full list. |
 | `--kind` | all | Filter results by span kind: `code`, `markdown`, `plain-text`, `xml-doc`, `line-comment-block`, `block-comment`. Repeatable. |
 | `-B`, `--context-before` | 0 | Lines of context before each match. |
@@ -242,14 +247,16 @@ repoId  a1b2c3d4e5f6
 started 2026-04-15T10:00:00.0000000+00:00
 rev     kind=Git current=abc123def456..., indexed=abc123def456...
 stale   False (pending=0)
-files   indexed=12403 skipped=2 maxFileBytes=52428800
+files   indexed=12403 skipped=2 maxFileBytes=52428800 updates=Live
 skips   too_large=2
 recon   2026-04-15T10:05:00.0000000+00:00
 ```
 
 ### 2.4 `idx rescan`
 
-Trigger a reconciliation rescan. The daemon compares the git file set against the index and enqueues corrective events for any discrepancies. Returns immediately; the rescan runs asynchronously.
+Trigger a reconciliation rescan. The daemon compares the target's current file
+set against the index and enqueues corrective events for any discrepancies.
+Returns immediately; the rescan runs asynchronously.
 
 ```bash
 idx rescan
@@ -320,6 +327,7 @@ Returns daemon health and freshness metadata.
   "index": {
     "indexedFileCount": 12403,
     "maxIndexableFileBytes": 52428800,
+    "updateMode": "Live",
     "initialScanInProgress": false,
     "includeGlobs": [
       "**/*.cs",
@@ -506,6 +514,8 @@ The daemon accepts these command-line arguments (via `Indexed.Service` `Program.
 | `--exclude-index` | (none) | Glob patterns to exclude from indexing (repeatable) |
 | `--max-indexable-file-mb` | 50 | Maximum indexable file size in MiB |
 | `--max-indexable-file-bytes` | 52,428,800 | Exact byte form of the same cap |
+| `--index-updates` | `live` | Post-start update policy: `live` for automatic watchers/reconciliation, `manual` for explicit rescans only |
+| `--manual-index-updates` | off | Shorthand for `--index-updates manual` |
 | `--no-default-excludes` | off | Do not apply the built-in default exclude list |
 | `--no-default-directory-excludes` | off | Directory targets only. Disable the directory-mode default excludes |
 
@@ -574,11 +584,24 @@ or docs-only targets:
 idx status --root C:\src\workspace --include-index "src/**/*.cs" --include-index "tests/**/*.cs"
 ```
 
-Index-time include/exclude settings participate in the target id. Starting the
-same root with a different include set, exclude set, default-exclude policy, or
-file-size cap creates a different target directory under `%LOCALAPPDATA%\Indexed`.
+Index-time include/exclude settings, the file-size cap, and the update mode
+participate in the target id. Starting the same root with a different include
+set, exclude set, default-exclude policy, file-size cap, or update mode creates
+a different target directory under `%LOCALAPPDATA%\Indexed`.
 
-### 5.3 Directory-mode default excludes
+### 5.3 Update modes
+
+`--index-updates live` is the default. Live mode starts `DirectoryWatcher`,
+git `HeadPoller` where applicable, periodic reconciliation, and query-time
+repair events. This is the right choice for actively edited workspaces.
+
+`--index-updates manual` disables those automatic post-start update sources.
+The daemon still performs the initial full scan when the index is empty, and
+`idx rescan` / `POST /rescan` still enqueue an explicit reconciliation pass.
+This is useful for static corpora, generated snapshots, or directories whose
+changes are controlled by an external workflow.
+
+### 5.4 Directory-mode default excludes
 
 Directory targets apply a second built-in list by default to avoid walking obvious low-value or hazardous trees such as:
 

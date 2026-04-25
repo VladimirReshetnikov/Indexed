@@ -109,6 +109,15 @@ internal static class DaemonLauncher
             psi.ArgumentList.Add("--max-indexable-file-bytes");
             psi.ArgumentList.Add(targetSpec.MaxIndexableFileBytes.ToString(System.Globalization.CultureInfo.InvariantCulture));
         }
+        if (targetSpec.UpdateMode != IndexUpdateMode.Live)
+        {
+            psi.ArgumentList.Add("--index-updates");
+            psi.ArgumentList.Add(targetSpec.UpdateMode switch
+            {
+                IndexUpdateMode.Manual => "manual",
+                _ => throw new InvalidOperationException($"unsupported update mode '{targetSpec.UpdateMode}'"),
+            });
+        }
 
         using var _ = Process.Start(psi)
             ?? throw new InvalidOperationException("Process.Start returned null");

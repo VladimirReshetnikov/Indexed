@@ -96,7 +96,7 @@ internal static class OutputFormatter
         {
             var scan = index.InitialScanInProgress ? " initial-scan" : string.Empty;
             writer.WriteLine(
-                $"files   indexed={index.IndexedFileCount} skipped={index.Skips?.Total ?? 0} maxFileBytes={index.MaxIndexableFileBytes}{scan}");
+                $"files   indexed={index.IndexedFileCount} skipped={index.Skips?.Total ?? 0} maxFileBytes={index.MaxIndexableFileBytes} updates={index.UpdateMode}{scan}");
             if (index.Skips?.ByReason is { Count: > 0 } reasons)
             {
                 writer.WriteLine($"skips   {string.Join(", ", Reasons(reasons))}");

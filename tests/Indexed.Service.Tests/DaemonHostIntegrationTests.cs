@@ -600,4 +600,86 @@ public sealed class DaemonHostIntegrationTests : IDisposable
             await host.DisposeAsync();
         }
     }
+
+    [Fact]
+    public async Task DirectoryTree_ManualUpdateMode_IndexesChangesOnlyAfterRescan()
+    {
+        var root = NewDirectoryRootWithContent(Array.Empty<(string path, string content)>());
+        var appData = Path.Combine(_tempRoot, "appdata-dir-manual");
+        Directory.CreateDirectory(appData);
+
+        var host = new DaemonHost(new DaemonOptions
+        {
+            TargetSelection = new TargetSelection
+            {
+                Roots = new[] { new TargetRootSpec(null, root) },
+                UseDefaultIndexExcludes = false,
+                UseDefaultDirectoryExcludes = false,
+                UpdateMode = IndexUpdateMode.Manual,
+            },
+            AppDataBase = appData,
+            UseSingletonMutex = false,
+            IdleTimeout = TimeSpan.FromMinutes(5),
+        });
+
+        try
+        {
+            await host.StartAsync();
+            _ = host.RunAsync();
+
+            using var http = new HttpClient
+            {
+                BaseAddress = new Uri($"http://127.0.0.1:{host.Info.Port}/"),
+                Timeout = TimeSpan.FromSeconds(10),
+            };
+
+            await WaitForAsync(async () =>
+            {
+                var status = await http.GetFromJsonAsync("status", IndexedJsonContext.Default.StatusResponse);
+                return status?.Freshness.IsStale == false;
+            });
+
+            var statusBeforeChange = await http.GetFromJsonAsync("status", IndexedJsonContext.Default.StatusResponse);
+            Assert.NotNull(statusBeforeChange);
+            Assert.Equal(IndexUpdateMode.Manual, statusBeforeChange!.Index!.UpdateMode);
+
+            var laterFile = Path.Combine(root, "later.cs");
+            File.WriteAllText(laterFile, "class Later { string token = \"manual-directory-token\"; }");
+
+            await Task.Delay(500);
+
+            using (var beforeRescan = await http.PostAsJsonAsync(
+                "search",
+                new SearchRequest("manual-directory-token", Mode: QueryMode.Code),
+                IndexedJsonContext.Default.SearchRequest))
+            {
+                beforeRescan.EnsureSuccessStatusCode();
+                await using var stream = await beforeRescan.Content.ReadAsStreamAsync();
+                var body = JsonSerializer.Deserialize(stream, IndexedJsonContext.Default.SearchResponse);
+                Assert.NotNull(body);
+                Assert.Empty(body!.Matches);
+            }
+
+            using (var rescan = await http.PostAsync("rescan", content: null))
+            {
+                rescan.EnsureSuccessStatusCode();
+            }
+
+            await WaitForAsync(async () =>
+            {
+                using var resp = await http.PostAsJsonAsync(
+                    "search",
+                    new SearchRequest("manual-directory-token", Mode: QueryMode.Code),
+                    IndexedJsonContext.Default.SearchRequest);
+                if (!resp.IsSuccessStatusCode) return false;
+                await using var stream = await resp.Content.ReadAsStreamAsync();
+                var body = JsonSerializer.Deserialize(stream, IndexedJsonContext.Default.SearchResponse);
+                return body is { Matches.Count: > 0 };
+            });
+        }
+        finally
+        {
+            await host.DisposeAsync();
+        }
+    }
 }

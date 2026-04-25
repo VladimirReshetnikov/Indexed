@@ -1,6 +1,7 @@
 using System.IO;
 using Indexed.Abstractions;
 using Indexed.Cli;
+using Indexed.Targets;
 using Xunit;
 
 namespace Indexed.Cli.Tests;
@@ -369,6 +370,33 @@ public sealed class ArgumentParserTests
 
         Assert.Equal(CliCommand.Help, r.Command);
         Assert.Contains("positive", r.Diagnostic);
+    }
+
+    [Fact]
+    public void Find_IndexUpdatesManual_Parsed()
+    {
+        var r = ArgumentParser.Parse(new[] { "find", "foo", "--index-updates", "manual" });
+
+        Assert.Equal(CliCommand.Find, r.Command);
+        Assert.Equal(IndexUpdateMode.Manual, r.UpdateMode);
+    }
+
+    [Fact]
+    public void Find_ManualIndexUpdatesAlias_Parsed()
+    {
+        var r = ArgumentParser.Parse(new[] { "find", "foo", "--manual-index-updates" });
+
+        Assert.Equal(CliCommand.Find, r.Command);
+        Assert.Equal(IndexUpdateMode.Manual, r.UpdateMode);
+    }
+
+    [Fact]
+    public void Find_IndexUpdates_RejectsUnknownMode()
+    {
+        var r = ArgumentParser.Parse(new[] { "find", "foo", "--index-updates", "sometimes" });
+
+        Assert.Equal(CliCommand.Help, r.Command);
+        Assert.Contains("live or manual", r.Diagnostic);
     }
 
     [Fact]

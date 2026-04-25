@@ -27,6 +27,7 @@ namespace Indexed.Cli;
 ///                    [--json] [--repo-root &lt;dir&gt;] [--root &lt;dir&gt;|&lt;label=dir&gt;]...
 ///                    [--include-index &lt;g&gt;]* [--exclude-index &lt;g&gt;]*
 ///                    [--max-indexable-file-mb N|--max-indexable-file-bytes N]
+///                    [--index-updates live|manual]
 ///                    [--idle-timeout-seconds N]
 /// idx status [--repo-root &lt;dir&gt;|--root &lt;dir&gt;|&lt;label=dir&gt; ...] [--json] [daemon options]
 /// idx rescan [--repo-root &lt;dir&gt;|--root &lt;dir&gt;|&lt;label=dir&gt; ...] [daemon options]
@@ -66,6 +67,7 @@ public static class ArgumentParser
         List<string>? indexIncludeGlob = null;
         List<string>? indexExcludeGlob = null;
         long? maxIndexableFileBytes = null;
+        var updateMode = IndexUpdateMode.Live;
         var noDefaultExcludes = false;
         List<SpanKind>? kindFilter = null;
         var contextBefore = 0;
@@ -124,6 +126,12 @@ public static class ArgumentParser
                         {
                             maxIndexableFileBytes = ParseLong(TakeArg(ref i, a)!, a, positive: true) * 1024L * 1024L;
                         }
+                        break;
+                    case "--index-updates":
+                        updateMode = ParseUpdateMode(TakeArg(ref i, a)!);
+                        break;
+                    case "--manual-index-updates":
+                        updateMode = IndexUpdateMode.Manual;
                         break;
                     case "--no-default-excludes":
                         noDefaultExcludes = true;
@@ -202,6 +210,7 @@ public static class ArgumentParser
                 indexIncludeGlob,
                 indexExcludeGlob,
                 maxIndexableFileBytes,
+                updateMode,
                 noDefaultExcludes,
                 kindFilter,
                 contextBefore,
@@ -225,6 +234,7 @@ public static class ArgumentParser
                 IndexIncludeGlob = indexIncludeGlob,
                 IndexExcludeGlob = indexExcludeGlob,
                 MaxIndexableFileBytes = maxIndexableFileBytes,
+                UpdateMode = updateMode,
                 NoDefaultExcludes = noDefaultExcludes,
                 NoDefaultDirectoryExcludes = noDefaultDirectoryExcludes,
                 KindFilter = kindFilter,
@@ -265,6 +275,13 @@ public static class ArgumentParser
         "line-comment-block" => SpanKind.LineCommentBlock,
         "block-comment" => SpanKind.BlockComment,
         _ => throw new ArgumentParseException($"invalid --kind: {s}"),
+    };
+
+    private static IndexUpdateMode ParseUpdateMode(string s) => s switch
+    {
+        "live" => IndexUpdateMode.Live,
+        "manual" => IndexUpdateMode.Manual,
+        _ => throw new ArgumentParseException($"invalid --index-updates: {s}; expected live or manual"),
     };
 
     private static int ParseInt(string s, string flag)
@@ -321,6 +338,7 @@ public static class ArgumentParser
         IReadOnlyList<string>? indexIncludeGlob,
         IReadOnlyList<string>? indexExcludeGlob,
         long? maxIndexableFileBytes,
+        IndexUpdateMode updateMode,
         bool noDefaultExcludes,
         IReadOnlyList<SpanKind>? kindFilter,
         int contextBefore,
@@ -345,6 +363,7 @@ public static class ArgumentParser
             || indexIncludeGlob is { Count: > 0 }
             || indexExcludeGlob is { Count: > 0 }
             || maxIndexableFileBytes is not null
+            || updateMode != IndexUpdateMode.Live
             || noDefaultExcludes
             || noDefaultDirectoryExcludes
             || kindFilter is { Count: > 0 }
@@ -397,6 +416,9 @@ public static class ArgumentParser
           --max-indexable-file-mb <n>   daemon file-size cap in MiB (new daemon only)
           --max-indexable-file-bytes <n>
                                         daemon file-size cap in bytes (new daemon only)
+          --index-updates <live|manual> live watches files and reconciles periodically;
+                                        manual updates only on startup and rescan
+          --manual-index-updates        shorthand for --index-updates manual
           --no-default-excludes         do not apply built-in default exclude list
                                           (lockfiles, minified bundles, generated C#)
           --idle-timeout-seconds <n>    daemon idle timeout override (new daemon only)

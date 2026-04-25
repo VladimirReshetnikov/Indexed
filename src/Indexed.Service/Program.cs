@@ -20,6 +20,8 @@ using Microsoft.Extensions.Logging;
 //   --max-indexable-file-mb <n>  Override max indexable file size in MiB.
 //   --max-indexable-file-bytes <n>
 //                                Override max indexable file size in bytes.
+//   --index-updates live|manual  Control automatic post-start update sources.
+//   --manual-index-updates       Shorthand for --index-updates manual.
 //   --no-default-excludes        Disable the binary-adjacent default excludes.
 //   --no-default-directory-excludes
 //                                Disable the directory-mode default excludes.

@@ -31,11 +31,13 @@ namespace Indexed.Service;
 /// for <c>/search</c> and return cached metadata for everything else. The host
 /// owns the per-target <see cref="SqliteIndex"/>: it opens <c>index.db</c>
 /// during <see cref="StartAsync"/>, runs an initial full scan when required
-/// (empty DB or schema mismatch), and wires incremental indexing
-/// (<see cref="DirectoryWatcher"/>, optional <see cref="IRevisionTracker"/>,
-/// and background reconciliation) before entering the request loop. <c>POST /rescan</c>
-/// enqueues a reconciliation request and returns immediately; the actual work
-/// happens asynchronously on the incremental indexer worker.
+/// (empty DB or schema mismatch), and wires the incremental indexer before
+/// entering the request loop. In live update mode it also starts automatic
+/// sources (<see cref="DirectoryWatcher"/>, optional <see cref="IRevisionTracker"/>,
+/// and background reconciliation). In manual update mode, <c>POST /rescan</c>
+/// is the only post-start reindex trigger; it enqueues a reconciliation request
+/// and returns immediately while the actual work happens asynchronously on the
+/// incremental indexer worker.
 /// </para>
 /// <para>
 /// Lifecycle:
@@ -126,6 +128,7 @@ internal sealed class DaemonHost : IAsyncDisposable
             UseDefaultIndexExcludes = _options.UseDefaultIndexExcludes,
             UseDefaultDirectoryExcludes = _options.UseDefaultDirectoryExcludes,
             MaxIndexableFileBytes = _options.MaxIndexableFileBytes,
+            UpdateMode = _options.UpdateMode,
         };
 
         _target = targetSelection.OpenTarget(cancellationToken);
@@ -193,20 +196,27 @@ internal sealed class DaemonHost : IAsyncDisposable
             _incrementalIndexer.BatchCommitted += () => _indexOptimizer?.NotifyDirty();
             _incrementalIndexer.Start();
 
-            _directoryWatcher = new DirectoryWatcher(
-                _target, _eventQueue, _indexingOptions, _logger);
-            _directoryWatcher.Start();
-
-            if (_repo is not null)
+            if (_target.Spec.UpdateMode == IndexUpdateMode.Live)
             {
-                _revisionTracker = new HeadPoller(
-                    _repo, _index, _eventQueue, interval: null, _logger);
-                _revisionTracker.Start();
-            }
+                _directoryWatcher = new DirectoryWatcher(
+                    _target, _eventQueue, _indexingOptions, _logger);
+                _directoryWatcher.Start();
 
-            _reconciliationScheduler = new ReconciliationScheduler(
-                _eventQueue, interval: null, _logger);
-            _reconciliationScheduler.Start();
+                if (_repo is not null)
+                {
+                    _revisionTracker = new HeadPoller(
+                        _repo, _index, _eventQueue, interval: null, _logger);
+                    _revisionTracker.Start();
+                }
+
+                _reconciliationScheduler = new ReconciliationScheduler(
+                    _eventQueue, interval: null, _logger);
+                _reconciliationScheduler.Start();
+            }
+            else
+            {
+                _logger.LogInformation("manual index update mode selected; automatic watcher, revision poller, and reconciliation scheduler are disabled");
+            }
 
             if (_options.RunInitialScan && _index.GetFileCount() == 0)
             {
@@ -214,7 +224,11 @@ internal sealed class DaemonHost : IAsyncDisposable
             }
 
             var contentProvider = new FileContentProvider(_target, _indexingOptions.MaxIndexableFileBytes);
-            _backend = new SqliteSearchBackend(_index, BuildFreshness, contentProvider, _eventQueue);
+            _backend = new SqliteSearchBackend(
+                _index,
+                BuildFreshness,
+                contentProvider,
+                _target.Spec.UpdateMode == IndexUpdateMode.Live ? _eventQueue : null);
             _indexOptimizer.Start();
         }
 
@@ -542,6 +556,7 @@ internal sealed class DaemonHost : IAsyncDisposable
         return new IndexStatus(
             IndexedFileCount: _index.GetFileCount(),
             MaxIndexableFileBytes: _indexingOptions.MaxIndexableFileBytes,
+            UpdateMode: _target!.Spec.UpdateMode,
             InitialScanInProgress: Volatile.Read(ref _initialScanInProgress) != 0,
             IncludeGlobs: _indexingOptions.IncludeGlobs,
             ExcludeGlobs: _indexingOptions.ExcludeGlobs,

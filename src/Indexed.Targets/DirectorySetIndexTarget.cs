@@ -35,7 +35,8 @@ public sealed class DirectorySetIndexTarget : IIndexTarget
         bool useDefaultIndexExcludes = true,
         bool useDefaultDirectoryExcludes = true,
         IReadOnlyList<string>? indexIncludeGlobs = null,
-        long maxIndexableFileBytes = TargetIndexDefaults.DefaultMaxIndexableFileBytes)
+        long maxIndexableFileBytes = TargetIndexDefaults.DefaultMaxIndexableFileBytes,
+        IndexUpdateMode updateMode = IndexUpdateMode.Live)
     {
         var spec = TargetSpecFactory.CreateDirectorySet(
             roots,
@@ -43,7 +44,8 @@ public sealed class DirectorySetIndexTarget : IIndexTarget
             useDefaultIndexExcludes,
             useDefaultDirectoryExcludes,
             indexIncludeGlobs,
-            maxIndexableFileBytes);
+            maxIndexableFileBytes,
+            updateMode);
         return new DirectorySetIndexTarget(
             spec,
             Indexed.Targets.TargetId.Compute(spec),

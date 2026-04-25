@@ -81,6 +81,7 @@ internal static class CliApp
                 UseDefaultIndexExcludes = !args.NoDefaultExcludes,
                 UseDefaultDirectoryExcludes = !args.NoDefaultDirectoryExcludes,
                 MaxIndexableFileBytes = args.MaxIndexableFileBytes ?? Indexed.Targets.TargetIndexDefaults.DefaultMaxIndexableFileBytes,
+                UpdateMode = args.UpdateMode,
             };
         }
 
@@ -92,6 +93,7 @@ internal static class CliApp
             UseDefaultIndexExcludes = !args.NoDefaultExcludes,
             UseDefaultDirectoryExcludes = false,
             MaxIndexableFileBytes = args.MaxIndexableFileBytes ?? Indexed.Targets.TargetIndexDefaults.DefaultMaxIndexableFileBytes,
+            UpdateMode = args.UpdateMode,
         };
     }
 

@@ -22,6 +22,8 @@ public sealed record TargetSelection
 
     public long MaxIndexableFileBytes { get; init; } = TargetIndexDefaults.DefaultMaxIndexableFileBytes;
 
+    public IndexUpdateMode UpdateMode { get; init; } = IndexUpdateMode.Live;
+
     public IIndexTarget OpenTarget(CancellationToken cancellationToken = default)
     {
         if (!string.IsNullOrWhiteSpace(RepoRoot) && Roots is { Count: > 0 })
@@ -38,14 +40,16 @@ public sealed record TargetSelection
                     UseDefaultIndexExcludes,
                     UseDefaultDirectoryExcludes,
                     IndexIncludeGlobs,
-                    MaxIndexableFileBytes)
+                    MaxIndexableFileBytes,
+                    UpdateMode)
                 : DirectorySetIndexTarget.Open(
                     Roots,
                     IndexExcludeGlobs,
                     UseDefaultIndexExcludes,
                     UseDefaultDirectoryExcludes,
                     IndexIncludeGlobs,
-                    MaxIndexableFileBytes);
+                    MaxIndexableFileBytes,
+                    UpdateMode);
         }
 
         if (string.IsNullOrWhiteSpace(RepoRoot))
@@ -58,6 +62,7 @@ public sealed record TargetSelection
             UseDefaultDirectoryExcludes,
             IndexIncludeGlobs,
             MaxIndexableFileBytes,
+            UpdateMode,
             cancellationToken);
     }
 }

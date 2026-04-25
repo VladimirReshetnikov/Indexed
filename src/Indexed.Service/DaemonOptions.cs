@@ -97,6 +97,13 @@ public sealed record DaemonOptions
     public long MaxIndexableFileBytes { get; init; } = Indexed.Targets.TargetIndexDefaults.DefaultMaxIndexableFileBytes;
 
     /// <summary>
+    /// Controls whether automatic filesystem/revision/reconciliation sources
+    /// are started. Manual mode still allows the initial scan and explicit
+    /// <c>POST /rescan</c> work.
+    /// </summary>
+    public Indexed.Targets.IndexUpdateMode UpdateMode { get; init; } = Indexed.Targets.IndexUpdateMode.Live;
+
+    /// <summary>
     /// When <c>true</c> (default), the daemon prepends
     /// <see cref="Indexed.Core.ExcludeFilter.DefaultBinaryAdjacentGlobs"/> to
     /// <see cref="IndexExcludeGlobs"/> before passing the combined list to the

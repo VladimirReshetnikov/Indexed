@@ -1,6 +1,7 @@
 using System;
 using System.IO;
 using Indexed.Service;
+using Indexed.Targets;
 using Xunit;
 
 namespace Indexed.Service.Tests;
@@ -119,6 +120,31 @@ public sealed class DaemonCommandLineTests : IDisposable
         Assert.NotNull(options.TargetSelection);
         Assert.Equal(new[] { "**/*.md" }, options.TargetSelection!.IndexIncludeGlobs);
         Assert.Equal(2L * 1024 * 1024, options.TargetSelection.MaxIndexableFileBytes);
+    }
+
+    [Fact]
+    public void IndexUpdatesManual_ParseForGitMode()
+    {
+        var options = DaemonCommandLine.ParseOptions(new[]
+        {
+            "--repo-root", @"C:\repo",
+            "--index-updates", "manual",
+        });
+
+        Assert.Equal(IndexUpdateMode.Manual, options.UpdateMode);
+    }
+
+    [Fact]
+    public void ManualIndexUpdatesAlias_ParseForDirectoryMode()
+    {
+        var options = DaemonCommandLine.ParseOptions(new[]
+        {
+            "--root", @"C:\tree",
+            "--manual-index-updates",
+        });
+
+        Assert.NotNull(options.TargetSelection);
+        Assert.Equal(IndexUpdateMode.Manual, options.TargetSelection!.UpdateMode);
     }
 
     [Fact]

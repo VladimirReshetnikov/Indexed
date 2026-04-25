@@ -3,14 +3,14 @@
 Background-indexed full-text search service for a local workspace target, aimed primarily at AI coding agents that need millisecond-class code search across a git repository, a standalone directory tree, or an explicit multi-directory workspace.
 
 - Created (UTC): 2026-04-15T17:00:00Z
-- Updated (UTC): 2026-04-25T20:12:31Z
-- Repository HEAD: 8d573b569cd63e77dea836599ba58819022d3074
+- Updated (UTC): 2026-04-25T20:46:08Z
+- Repository HEAD: beeccd1b652dd32394ba3e4f6128a8a3c30abf9a
 
 ## Project goals
 
 - **Warm, millisecond-class code search** for workspaces you search repeatedly.
 - **Agent-friendly** JSON and HTTP API on localhost (stable DTOs, explicit freshness).
-- **Eventually-consistent indexing** that keeps up with edits and, for git targets, HEAD changes.
+- **Configurable update policy**: live background updates by default, or manual-only refresh through explicit rescans.
 - **Low operational friction**: auto-start on first use, auto-exit on idle, self-healing rebuilds.
 
 ## Non-goals
@@ -23,7 +23,7 @@ Background-indexed full-text search service for a local workspace target, aimed 
 
 - **C# / .NET 10** (`net10.0-windows`, nullable enabled, preview language features).
 - **SQLite + FTS5** via `Microsoft.Data.Sqlite` (code index uses the trigram tokenizer).
-- **Incremental indexing** via `FileSystemWatcher` + optional git HEAD polling + reconciliation.
+- **Incremental indexing** via `FileSystemWatcher` + optional git HEAD polling + reconciliation in live mode.
 - **HTTP/JSON daemon** on `127.0.0.1` (service) with a thin CLI client (`idx`).
 - **Serialization** via `System.Text.Json` source generation (`IndexedJsonContext`).
 
@@ -36,6 +36,7 @@ Background-indexed full-text search service for a local workspace target, aimed 
 - **Path filtering** via gitignore-style globs: `--glob` and `--exclude`.
 - **Index-time include/exclude filtering** (`--include-index`, `--exclude-index`) plus curated default excludes for lockfiles/minified/generated outputs.
 - **Configurable file-size cap** (`--max-indexable-file-mb` / `--max-indexable-file-bytes`) with status-visible non-indexable-file telemetry.
+- **Manual update mode** (`--index-updates manual`) for static or externally-controlled targets where only startup scans and explicit `idx rescan` should change the index.
 - **Directory-tree and directory-set targets** via repeated `--root` flags, including continuous background indexing outside git.
 - **Context lines** (`-A`, `-B`, `-C`) without re-running a full scan per query.
 - **Kind-aware text output** for prose hits plus stable JSON contracts for agents.

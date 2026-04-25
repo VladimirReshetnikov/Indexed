@@ -31,8 +31,8 @@ namespace Indexed.Core;
 ///   <item><description>Stale candidates (index ahead of disk edits): the disk scan
 ///   naturally returns zero hits for content that no longer exists.</description></item>
 ///   <item><description>Missing files: <see cref="FileContentProvider.ReadAsync"/>
-///   yields <c>null</c>; the executor optionally enqueues a
-///   <see cref="FileChanged"/> repair event so the incremental indexer
+///   yields <c>null</c>; live-mode callers pass a repair queue so the
+///   executor can enqueue a repair event and the incremental indexer
 ///   self-heals.</description></item>
 ///   <item><description>Fresh edits not yet indexed: same staleness class as before
 ///   — the candidate list may miss a file whose trigrams the indexer has

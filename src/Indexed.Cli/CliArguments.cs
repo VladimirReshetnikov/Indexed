@@ -83,6 +83,12 @@ public sealed record CliArguments
     public long? MaxIndexableFileBytes { get; init; }
 
     /// <summary>
+    /// Controls automatic daemon update sources. Manual mode keeps the index
+    /// fixed except for initial scans and explicit rescans.
+    /// </summary>
+    public IndexUpdateMode UpdateMode { get; init; } = IndexUpdateMode.Live;
+
+    /// <summary>
     /// When <c>true</c>, the daemon will <em>not</em> apply the built-in
     /// default exclude list (lockfiles, minified bundles, generated C#).
     /// Maps to <c>--no-default-excludes</c> on the CLI.

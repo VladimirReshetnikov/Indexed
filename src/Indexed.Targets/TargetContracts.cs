@@ -27,7 +27,8 @@ public sealed record TargetSpec(
     IReadOnlyList<string>? IndexExcludeGlobs,
     bool UseDefaultIndexExcludes,
     bool UseDefaultDirectoryExcludes,
-    long MaxIndexableFileBytes);
+    long MaxIndexableFileBytes,
+    IndexUpdateMode UpdateMode = IndexUpdateMode.Live);
 
 public interface IIndexTarget
 {

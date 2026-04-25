@@ -57,6 +57,7 @@ namespace Indexed.Abstractions;
 [JsonSerializable(typeof(SpanKind))]
 [JsonSerializable(typeof(SortBy))]
 [JsonSerializable(typeof(TargetKind))]
+[JsonSerializable(typeof(IndexUpdateMode))]
 [JsonSerializable(typeof(TargetRoot))]
 [JsonSerializable(typeof(IndexedErrorCode))]
 public sealed partial class IndexedJsonContext : JsonSerializerContext

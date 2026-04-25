@@ -20,6 +20,7 @@ internal static class DaemonCommandLine
         var excludeGlobs = new List<string>();
         var useDefaultExcludes = true;
         var useDefaultDirectoryExcludes = true;
+        var updateMode = IndexUpdateMode.Live;
         List<string>? rootArgs = null;
 
         string TakeArg(ref int i, string flag)
@@ -71,6 +72,12 @@ internal static class DaemonCommandLine
                         maxIndexableFileBytes = maxMb * 1024L * 1024L;
                     }
                     break;
+                case "--index-updates":
+                    updateMode = ParseUpdateMode(TakeArg(ref i, args[i]));
+                    break;
+                case "--manual-index-updates":
+                    updateMode = IndexUpdateMode.Manual;
+                    break;
                 case "--no-default-excludes":
                     useDefaultExcludes = false;
                     break;
@@ -111,6 +118,7 @@ internal static class DaemonCommandLine
                     UseDefaultIndexExcludes = useDefaultExcludes,
                     UseDefaultDirectoryExcludes = useDefaultDirectoryExcludes,
                     MaxIndexableFileBytes = maxIndexableFileBytes,
+                    UpdateMode = updateMode,
                 }
                 : null,
             AppDataBase = appData,
@@ -120,6 +128,17 @@ internal static class DaemonCommandLine
             UseDefaultIndexExcludes = useDefaultExcludes,
             UseDefaultDirectoryExcludes = roots is not null && useDefaultDirectoryExcludes,
             MaxIndexableFileBytes = maxIndexableFileBytes,
+            UpdateMode = updateMode,
         };
     }
+
+    private static IndexUpdateMode ParseUpdateMode(string value)
+        => value switch
+        {
+            "live" => IndexUpdateMode.Live,
+            "manual" => IndexUpdateMode.Manual,
+            _ => throw new ArgumentException(
+                $"--index-updates must be one of: live, manual; got '{value}'",
+                nameof(value)),
+        };
 }

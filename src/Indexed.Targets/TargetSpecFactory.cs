@@ -12,7 +12,8 @@ public static class TargetSpecFactory
         bool useDefaultIndexExcludes = true,
         bool useDefaultDirectoryExcludes = false,
         IReadOnlyList<string>? indexIncludeGlobs = null,
-        long maxIndexableFileBytes = TargetIndexDefaults.DefaultMaxIndexableFileBytes)
+        long maxIndexableFileBytes = TargetIndexDefaults.DefaultMaxIndexableFileBytes,
+        IndexUpdateMode updateMode = IndexUpdateMode.Live)
         => CreateCore(
             TargetKind.GitRepository,
             new[] { new TargetRootSpec(Name: null, Path: repoRoot) },
@@ -20,7 +21,8 @@ public static class TargetSpecFactory
             indexExcludeGlobs,
             useDefaultIndexExcludes,
             useDefaultDirectoryExcludes,
-            maxIndexableFileBytes);
+            maxIndexableFileBytes,
+            updateMode);
 
     public static TargetSpec CreateDirectoryTree(
         string root,
@@ -28,7 +30,8 @@ public static class TargetSpecFactory
         bool useDefaultIndexExcludes = true,
         bool useDefaultDirectoryExcludes = true,
         IReadOnlyList<string>? indexIncludeGlobs = null,
-        long maxIndexableFileBytes = TargetIndexDefaults.DefaultMaxIndexableFileBytes)
+        long maxIndexableFileBytes = TargetIndexDefaults.DefaultMaxIndexableFileBytes,
+        IndexUpdateMode updateMode = IndexUpdateMode.Live)
         => CreateCore(
             TargetKind.DirectoryTree,
             new[] { new TargetRootSpec(Name: null, Path: root) },
@@ -36,7 +39,8 @@ public static class TargetSpecFactory
             indexExcludeGlobs,
             useDefaultIndexExcludes,
             useDefaultDirectoryExcludes,
-            maxIndexableFileBytes);
+            maxIndexableFileBytes,
+            updateMode);
 
     public static TargetSpec CreateDirectorySet(
         IReadOnlyList<TargetRootSpec> roots,
@@ -44,7 +48,8 @@ public static class TargetSpecFactory
         bool useDefaultIndexExcludes = true,
         bool useDefaultDirectoryExcludes = true,
         IReadOnlyList<string>? indexIncludeGlobs = null,
-        long maxIndexableFileBytes = TargetIndexDefaults.DefaultMaxIndexableFileBytes)
+        long maxIndexableFileBytes = TargetIndexDefaults.DefaultMaxIndexableFileBytes,
+        IndexUpdateMode updateMode = IndexUpdateMode.Live)
         => CreateCore(
             TargetKind.DirectorySet,
             roots,
@@ -52,7 +57,8 @@ public static class TargetSpecFactory
             indexExcludeGlobs,
             useDefaultIndexExcludes,
             useDefaultDirectoryExcludes,
-            maxIndexableFileBytes);
+            maxIndexableFileBytes,
+            updateMode);
 
     public static IReadOnlyList<TargetRoot> MaterializeRoots(TargetSpec spec)
     {
@@ -73,6 +79,7 @@ public static class TargetSpecFactory
             && spec.UseDefaultIndexExcludes
             && !spec.UseDefaultDirectoryExcludes
             && spec.MaxIndexableFileBytes == TargetIndexDefaults.DefaultMaxIndexableFileBytes
+            && spec.UpdateMode == IndexUpdateMode.Live
             && (spec.IndexIncludeGlobs is null || spec.IndexIncludeGlobs.Count == 0)
             && (spec.IndexExcludeGlobs is null || spec.IndexExcludeGlobs.Count == 0);
     }
@@ -84,10 +91,13 @@ public static class TargetSpecFactory
         IReadOnlyList<string>? indexExcludeGlobs,
         bool useDefaultIndexExcludes,
         bool useDefaultDirectoryExcludes,
-        long maxIndexableFileBytes)
+        long maxIndexableFileBytes,
+        IndexUpdateMode updateMode)
     {
         if (roots is null) throw new ArgumentNullException(nameof(roots));
         if (roots.Count == 0) throw new ArgumentException("at least one root is required", nameof(roots));
+        if (!Enum.IsDefined(updateMode))
+            throw new ArgumentOutOfRangeException(nameof(updateMode), updateMode, "unknown index update mode");
         if (maxIndexableFileBytes <= 0)
             throw new ArgumentOutOfRangeException(
                 nameof(maxIndexableFileBytes),
@@ -105,7 +115,8 @@ public static class TargetSpecFactory
             IndexExcludeGlobs: normalizedExcludes,
             UseDefaultIndexExcludes: useDefaultIndexExcludes,
             UseDefaultDirectoryExcludes: useDefaultDirectoryExcludes,
-            MaxIndexableFileBytes: maxIndexableFileBytes);
+            MaxIndexableFileBytes: maxIndexableFileBytes,
+            UpdateMode: updateMode);
     }
 
     private static IReadOnlyList<TargetRootSpec> NormalizeRoots(TargetKind kind, IReadOnlyList<TargetRootSpec> roots)

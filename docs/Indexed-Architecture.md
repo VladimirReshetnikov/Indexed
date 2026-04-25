@@ -1,8 +1,8 @@
 # Indexed — Architecture
 
 - Created (UTC): 2026-04-15T17:00:00Z
-- Updated (UTC): 2026-04-25T20:12:31Z
-- Repository HEAD: 8d573b569cd63e77dea836599ba58819022d3074
+- Updated (UTC): 2026-04-25T20:46:08Z
+- Repository HEAD: beeccd1b652dd32394ba3e4f6128a8a3c30abf9a
 - Status: Current-state architecture for the Indexed full-text search service. Covers Stages 0–5 as implemented, including prose extraction and truthful `auto` mode.
 
 ## 1. System overview
@@ -19,7 +19,7 @@ Primary consumers are AI coding agents. The service is designed for:
 
 - **Millisecond-class code search** via SQLite FTS5 with trigram tokenization.
 - **Regex search** via a Russ Cox–style trigram narrowing + .NET `Regex` verification.
-- **Eventually-consistent incremental updates** via `FileSystemWatcher`, optional git HEAD polling, and periodic reconciliation.
+- **Configurable update policy**: live mode uses `FileSystemWatcher`, optional git HEAD polling, and periodic reconciliation; manual mode refreshes only on startup and explicit rescans.
 - **Crash-safe persistence** via SQLite WAL mode with single-writer concurrency.
 
 ### Architecture diagram
@@ -125,7 +125,7 @@ Each served target gets a stable identifier:
 - **Legacy git-default compatibility case**: `repoId = SHA1( absolutePath(repoRoot) + "\0" + firstCommitSha )[0:12]`
 - **All other targets**: `targetId = SHA1(canonical-target-spec-byte-stream)[0:12]`
 
-The target-spec byte stream encodes target kind, normalized roots, include/exclude settings, file-size cap, and the directory-default switch. State lives under:
+The target-spec byte stream encodes target kind, normalized roots, include/exclude settings, file-size cap, update mode, and the directory-default switch. State lives under:
 
 ```
 %LOCALAPPDATA%\Indexed\<targetId>\
@@ -245,9 +245,10 @@ Exclude globs are composed at daemon startup from up to three sources:
 - **User-supplied globs** via `--exclude-index <glob>` (repeatable).
 
 Include globs come only from user-supplied `--include-index <glob>` flags. All
-include/exclude and file-size-cap settings participate in `TargetSpec` identity,
-so two daemon instances serving the same root with different index-shaping
-settings use different `%LOCALAPPDATA%\Indexed\<targetId>\` directories.
+include/exclude, file-size-cap, and update-mode settings participate in
+`TargetSpec` identity, so two daemon instances serving the same root with
+different index-shaping or update-policy settings use different
+`%LOCALAPPDATA%\Indexed\<targetId>\` directories.
 
 The include/exclude policy is applied uniformly by the full-scan indexer, the
 incremental indexer, and `DirectoryWatcher`, so a newly created out-of-scope file
@@ -279,12 +280,17 @@ Event types:
 
 | Event | Source | Processing |
 |-------|--------|------------|
-| `FileChanged(path)` | FSW, reconciliation | Read bytes, SHA-compare, UPSERT if changed |
-| `FileDeleted(path)` | FSW, reconciliation | Look up `file_id`, DELETE from `files` + `code_fts` |
-| `HeadMoved(old, new)` | HeadPoller (git targets only) | `git diff-tree -r --name-status -z`, expand A/M/D/R/C entries to file events |
-| `ReconciliationRequested` | ReconciliationScheduler, FSW error, `/rescan` | Path-set diff: target enumeration vs index; emit corrective events |
+| `FileChanged(path)` | FSW, reconciliation, query-time repair in live mode | Read bytes, SHA-compare, UPSERT if changed |
+| `FileDeleted(path)` | FSW, reconciliation, query-time repair in live mode | Look up `file_id`, DELETE from `files` + `code_fts` |
+| `HeadMoved(old, new)` | HeadPoller in live git targets only | `git diff-tree -r --name-status -z`, expand A/M/D/R/C entries to file events |
+| `ReconciliationRequested` | ReconciliationScheduler and FSW error in live mode; `/rescan` in all modes | Path-set diff: target enumeration vs index; emit corrective events |
 
 Transaction model: deletes and upserts each run in their own `WriterScope`. If an exception occurs, `scope.Fail()` triggers rollback. The `indexed_head` meta update runs in a dedicated scope.
+
+`IndexUpdateMode.Live` is the default and starts all automatic event sources
+below. `IndexUpdateMode.Manual` keeps the `IncrementalIndexer` and queue alive
+only for explicit `/rescan` work; it does not start `DirectoryWatcher`,
+`HeadPoller`, `ReconciliationScheduler`, or query-time repair events.
 
 ### 4.3 Event sources
 
@@ -348,7 +354,7 @@ A Russ Cox-style analyzer in four components:
 1. If the plan has an FTS5 expression: query `code_fts` for candidate `file_id` values.
 2. Fetch `(file_id, logical_path, sha256)` rows in batches of 256 files. No content column — the code index is contentless.
 3. If a path glob is specified: filter candidates against `files.logical_path`.
-4. For each candidate: read the file from disk via `FileContentProvider` (rooted at the selected target). If the file is missing, unreadable, or oversize (> `MaxIndexableFileBytes`), drop the candidate and enqueue a repair event so the incremental indexer converges.
+4. For each candidate: read the file from disk via `FileContentProvider` (rooted at the selected target). If the file is missing, unreadable, or oversize (> `MaxIndexableFileBytes`), drop the candidate. In live mode, enqueue a repair event so the incremental indexer converges; in manual mode, leave the index untouched until the next explicit rescan.
 5. Run the compiled `Regex` (regex mode) or `string.IndexOf` (literal mode) against the live on-disk content.
 6. Extract line, column, byte offset, context lines via `MatchExtraction`.
 7. Apply per-file cap (`maxMatchesPerFile`, default 20) and global cap (`maxMatches`, default 200).
@@ -356,8 +362,8 @@ A Russ Cox-style analyzer in four components:
 
 The FTS5 posting list is a *candidate oracle*, not the source of truth for match text. Three staleness classes are bounded:
 
-- **Stale candidate** (index ahead of disk edits): the disk scan naturally returns zero hits for content that no longer exists. Caller sees fewer matches; the indexer catches up.
-- **Missing file** (index references a deleted/renamed file): executor drops the candidate and enqueues `FileChanged(path)` so the incremental indexer deletes the row on its next batch.
+- **Stale candidate** (index ahead of disk edits): the disk scan naturally returns zero hits for content that no longer exists. Caller sees fewer matches; live mode catches up automatically, while manual mode waits for `idx rescan`.
+- **Missing file** (index references a deleted/renamed file): executor drops the candidate and, in live mode, enqueues a repair event so the incremental indexer deletes the row on its next batch.
 - **Fresh edit** (file modified after the last successful index): the scanner operates on the new content; trigrams that previously matched may no longer be present, or vice versa. No regression from v1.
 
 ### 5.4 Search modes
@@ -381,11 +387,11 @@ The FTS5 posting list is a *candidate oracle*, not the source of truth for match
 7. **Open index**: `SqliteIndex.OpenOrCreate(index.db)`. On corruption or schema mismatch: delete and recreate.
 8. **Construct the content provider**: `FileContentProvider` rooted at the selected target and configured with the target's file-size cap. Contentless FTS5 means the search backend rehydrates match text from disk, not from the index.
 9. **Start incremental pipeline**:
-   - `DebouncingEventQueue` (event broker; also receives repair events from the query executor)
-   - `IncrementalIndexer` (background worker)
-   - `DirectoryWatcher` (armed before the initial scan)
-   - optional `HeadPoller` (git targets only)
-   - `ReconciliationScheduler` (5-minute timer)
+   - `DebouncingEventQueue` (event broker)
+   - `IncrementalIndexer` (background worker; required for explicit rescans in both update modes)
+   - in live mode only: `DirectoryWatcher` (armed before the initial scan)
+   - in live git targets only: `HeadPoller`
+   - in live mode only: `ReconciliationScheduler` (5-minute timer)
 10. **Start the background optimizer** (`IndexOptimizer`): a 15-minute timer (configurable via `DaemonOptions.OptimizerInterval`) that runs bounded FTS5 segment merges. Each tick calls `SqliteIndex.RunFts5MergeAsync(pageBudget)` (default 512 pages) — enough to reclaim fragmentation from recent batch commits without stalling the writer. Skipped entirely when the writer has been idle since the previous tick.
 11. **Schedule full scan** (if index empty): run `FullScanIndexer` on a background task. `/status` is available immediately and reports `freshness.isStale=true` plus `index.initialScanInProgress=true` until the scan completes.
 

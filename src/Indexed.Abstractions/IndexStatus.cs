@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Text.Json.Serialization;
+using Indexed.Targets;
 
 namespace Indexed.Abstractions;
 
@@ -10,6 +11,7 @@ namespace Indexed.Abstractions;
 public sealed record IndexStatus(
     long IndexedFileCount,
     long MaxIndexableFileBytes,
+    [property: JsonConverter(typeof(JsonStringEnumConverter<IndexUpdateMode>))] IndexUpdateMode UpdateMode,
     bool InitialScanInProgress,
     IReadOnlyList<string>? IncludeGlobs = null,
     IReadOnlyList<string>? ExcludeGlobs = null,

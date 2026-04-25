@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Text.Json;
 using Indexed.Abstractions;
+using Indexed.Targets;
 using Xunit;
 
 namespace Indexed.Abstractions.Tests;
@@ -356,6 +357,7 @@ public sealed class JsonContractTests
             Index: new IndexStatus(
                 IndexedFileCount: 12,
                 MaxIndexableFileBytes: 4096,
+                UpdateMode: IndexUpdateMode.Manual,
                 InitialScanInProgress: true,
                 IncludeGlobs: new[] { "**/*.cs" },
                 ExcludeGlobs: new[] { "**/bin/**" },
@@ -378,10 +380,12 @@ public sealed class JsonContractTests
         AssertJsonRoundTrip(status, Context.StatusResponse);
         Assert.Contains("\"index\":", json);
         Assert.Contains("\"initialScanInProgress\":true", json);
+        Assert.Contains("\"updateMode\":\"Manual\"", json);
         Assert.Contains("\"reason\":\"too_large\"", json);
         Assert.Contains("\"includeGlobs\":[\"**/*.cs\"]", json);
         Assert.NotNull(round.Index);
         Assert.Equal(12, round.Index!.IndexedFileCount);
+        Assert.Equal(IndexUpdateMode.Manual, round.Index.UpdateMode);
     }
 
 

@@ -31,6 +31,7 @@ public static class TargetId
         WriteField(writer, spec.UseDefaultIndexExcludes ? "1" : "0");
         WriteField(writer, spec.UseDefaultDirectoryExcludes ? "1" : "0");
         WriteField(writer, spec.MaxIndexableFileBytes.ToString(CultureInfo.InvariantCulture));
+        WriteField(writer, spec.UpdateMode.ToString());
 
         var includeGlobs = spec.IndexIncludeGlobs ?? Array.Empty<string>();
         WriteField(writer, includeGlobs.Count.ToString(CultureInfo.InvariantCulture));

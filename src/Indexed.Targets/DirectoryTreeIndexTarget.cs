@@ -30,7 +30,8 @@ public sealed class DirectoryTreeIndexTarget : IIndexTarget
         bool useDefaultIndexExcludes = true,
         bool useDefaultDirectoryExcludes = true,
         IReadOnlyList<string>? indexIncludeGlobs = null,
-        long maxIndexableFileBytes = TargetIndexDefaults.DefaultMaxIndexableFileBytes)
+        long maxIndexableFileBytes = TargetIndexDefaults.DefaultMaxIndexableFileBytes,
+        IndexUpdateMode updateMode = IndexUpdateMode.Live)
     {
         var spec = TargetSpecFactory.CreateDirectoryTree(
             root,
@@ -38,7 +39,8 @@ public sealed class DirectoryTreeIndexTarget : IIndexTarget
             useDefaultIndexExcludes,
             useDefaultDirectoryExcludes,
             indexIncludeGlobs,
-            maxIndexableFileBytes);
+            maxIndexableFileBytes,
+            updateMode);
         return new DirectoryTreeIndexTarget(
             spec,
             Indexed.Targets.TargetId.Compute(spec),
