@@ -92,6 +92,18 @@ internal static class OutputFormatter
             $"rev     kind={status.Freshness.RevisionKind} current={status.Freshness.CurrentRevisionToken ?? "?"}, indexed={status.Freshness.IndexedRevisionToken ?? "?"}");
         writer.WriteLine(
             $"stale   {status.Freshness.IsStale} (pending={status.Freshness.PendingFileCount})");
+        if (status.Index is { } index)
+        {
+            var scan = index.InitialScanInProgress ? " initial-scan" : string.Empty;
+            writer.WriteLine(
+                $"files   indexed={index.IndexedFileCount} skipped={index.Skips?.Total ?? 0} maxFileBytes={index.MaxIndexableFileBytes}{scan}");
+            if (index.Skips?.ByReason is { Count: > 0 } reasons)
+            {
+                writer.WriteLine($"skips   {string.Join(", ", Reasons(reasons))}");
+            }
+            if (!string.IsNullOrEmpty(index.InitialScanError))
+                writer.WriteLine($"scan    error={index.InitialScanError}");
+        }
         if (status.Freshness.LastReconciliationAt is { } reconciledAt)
             writer.WriteLine($"recon   {reconciledAt:O}");
         if (!string.IsNullOrEmpty(status.Freshness.Note))
@@ -147,6 +159,12 @@ internal static class OutputFormatter
 
         var prefix = string.IsNullOrEmpty(root.Name) ? string.Empty : $"{root.Name}=";
         writer.WriteLine($"root    {prefix}{root.AbsolutePath}");
+    }
+
+    private static IEnumerable<string> Reasons(IReadOnlyList<IndexSkipReasonCount> reasons)
+    {
+        foreach (var reason in reasons)
+            yield return $"{reason.Reason}={reason.Count}";
     }
 
     private static string FormatMatchPrefix(Match match)

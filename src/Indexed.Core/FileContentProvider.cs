@@ -127,33 +127,44 @@ public sealed class FileContentProvider
     private readonly IIndexTarget? _target;
     private readonly string _primaryRootPath;
     private readonly string? _singleRootWithSep;
+    private readonly long _maxIndexableFileBytes;
 
     /// <summary>
     /// Create a provider backed by an index target. Logical paths are resolved
     /// through the target's root mapping.
     /// </summary>
-    public FileContentProvider(IIndexTarget target)
+    public FileContentProvider(
+        IIndexTarget target,
+        long maxIndexableFileBytes = IndexLimits.MaxIndexableFileBytes)
     {
         _target = target ?? throw new ArgumentNullException(nameof(target));
+        if (maxIndexableFileBytes <= 0)
+            throw new ArgumentOutOfRangeException(nameof(maxIndexableFileBytes));
         if (target.Roots.Count == 0)
             throw new ArgumentException("target must expose at least one root", nameof(target));
 
         _primaryRootPath = target.Roots[0].AbsolutePath;
+        _maxIndexableFileBytes = maxIndexableFileBytes;
     }
 
     /// <summary>
     /// Compatibility constructor for tests and single-root callers. Phase 2
     /// production code should prefer the <see cref="IIndexTarget"/> overload.
     /// </summary>
-    public FileContentProvider(string rootPath)
+    public FileContentProvider(
+        string rootPath,
+        long maxIndexableFileBytes = IndexLimits.MaxIndexableFileBytes)
     {
         if (string.IsNullOrEmpty(rootPath))
             throw new ArgumentException("rootPath is required", nameof(rootPath));
+        if (maxIndexableFileBytes <= 0)
+            throw new ArgumentOutOfRangeException(nameof(maxIndexableFileBytes));
 
         _primaryRootPath = Path.GetFullPath(rootPath);
         _singleRootWithSep = _primaryRootPath.EndsWith(Path.DirectorySeparatorChar)
             ? _primaryRootPath
             : _primaryRootPath + Path.DirectorySeparatorChar;
+        _maxIndexableFileBytes = maxIndexableFileBytes;
     }
 
     /// <summary>Primary root used for display and single-root compatibility tests.</summary>
@@ -206,11 +217,11 @@ public sealed class FileContentProvider
         {
             var info = new FileInfo(full);
             if (!info.Exists) return FileReadOutcome.Missing;
-            if (info.Length > IndexLimits.MaxIndexableFileBytes) return FileReadOutcome.Oversize;
+            if (info.Length > _maxIndexableFileBytes) return FileReadOutcome.Oversize;
 
             var bytes = await File.ReadAllBytesAsync(full, cancellationToken).ConfigureAwait(false);
             // Re-check length post-read in case the file grew between stat and read.
-            if (bytes.LongLength > IndexLimits.MaxIndexableFileBytes)
+            if (bytes.LongLength > _maxIndexableFileBytes)
                 return FileReadOutcome.Oversize;
 
             return FileReadOutcome.Ok(TextDecoder.Decode(bytes));

@@ -42,6 +42,8 @@ public sealed class GitIndexTarget : IIndexTarget, IRevisionDiffTarget, IExplici
         IReadOnlyList<string>? indexExcludeGlobs = null,
         bool useDefaultIndexExcludes = true,
         bool useDefaultDirectoryExcludes = false,
+        IReadOnlyList<string>? indexIncludeGlobs = null,
+        long maxIndexableFileBytes = TargetIndexDefaults.DefaultMaxIndexableFileBytes,
         CancellationToken cancellationToken = default)
     {
         var repository = GitRepository.Open(directory);
@@ -49,7 +51,9 @@ public sealed class GitIndexTarget : IIndexTarget, IRevisionDiffTarget, IExplici
             repository.RepoRoot,
             indexExcludeGlobs,
             useDefaultIndexExcludes,
-            useDefaultDirectoryExcludes);
+            useDefaultDirectoryExcludes,
+            indexIncludeGlobs,
+            maxIndexableFileBytes);
         var legacyRepoId = LegacyRepoId.Compute(repository.RepoRoot, repository.GetFirstCommitSha(cancellationToken));
         var targetId = Indexed.Targets.TargetId.Compute(spec, legacyRepoId);
         return new GitIndexTarget(

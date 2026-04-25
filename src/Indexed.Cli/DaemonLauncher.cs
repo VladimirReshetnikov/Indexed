@@ -79,6 +79,14 @@ internal static class DaemonLauncher
             psi.ArgumentList.Add("--idle-timeout-seconds");
             psi.ArgumentList.Add(idleTimeoutSeconds.Value.ToString());
         }
+        if (targetSpec.IndexIncludeGlobs is not null)
+        {
+            foreach (var glob in targetSpec.IndexIncludeGlobs)
+            {
+                psi.ArgumentList.Add("--include-index");
+                psi.ArgumentList.Add(glob);
+            }
+        }
         if (targetSpec.IndexExcludeGlobs is not null)
         {
             foreach (var glob in targetSpec.IndexExcludeGlobs)
@@ -95,6 +103,11 @@ internal static class DaemonLauncher
             && !targetSpec.UseDefaultDirectoryExcludes)
         {
             psi.ArgumentList.Add("--no-default-directory-excludes");
+        }
+        if (targetSpec.MaxIndexableFileBytes != Indexed.Targets.TargetIndexDefaults.DefaultMaxIndexableFileBytes)
+        {
+            psi.ArgumentList.Add("--max-indexable-file-bytes");
+            psi.ArgumentList.Add(targetSpec.MaxIndexableFileBytes.ToString(System.Globalization.CultureInfo.InvariantCulture));
         }
 
         using var _ = Process.Start(psi)

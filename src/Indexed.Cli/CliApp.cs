@@ -76,18 +76,22 @@ internal static class CliApp
             return new TargetSelection
             {
                 Roots = args.Roots,
+                IndexIncludeGlobs = args.IndexIncludeGlob,
                 IndexExcludeGlobs = args.IndexExcludeGlob,
                 UseDefaultIndexExcludes = !args.NoDefaultExcludes,
                 UseDefaultDirectoryExcludes = !args.NoDefaultDirectoryExcludes,
+                MaxIndexableFileBytes = args.MaxIndexableFileBytes ?? Indexed.Targets.TargetIndexDefaults.DefaultMaxIndexableFileBytes,
             };
         }
 
         return new TargetSelection
         {
             RepoRoot = args.RepoRoot ?? Directory.GetCurrentDirectory(),
+            IndexIncludeGlobs = args.IndexIncludeGlob,
             IndexExcludeGlobs = args.IndexExcludeGlob,
             UseDefaultIndexExcludes = !args.NoDefaultExcludes,
             UseDefaultDirectoryExcludes = false,
+            MaxIndexableFileBytes = args.MaxIndexableFileBytes ?? Indexed.Targets.TargetIndexDefaults.DefaultMaxIndexableFileBytes,
         };
     }
 

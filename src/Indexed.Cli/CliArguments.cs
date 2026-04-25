@@ -72,6 +72,17 @@ public sealed record CliArguments
     public IReadOnlyList<string>? IndexExcludeGlob { get; init; }
 
     /// <summary>
+    /// Index-time include globs forwarded to the daemon on launch.
+    /// Null or empty means all target files remain in scope.
+    /// </summary>
+    public IReadOnlyList<string>? IndexIncludeGlob { get; init; }
+
+    /// <summary>
+    /// Optional daemon launch override for the maximum indexable file size.
+    /// </summary>
+    public long? MaxIndexableFileBytes { get; init; }
+
+    /// <summary>
     /// When <c>true</c>, the daemon will <em>not</em> apply the built-in
     /// default exclude list (lockfiles, minified bundles, generated C#).
     /// Maps to <c>--no-default-excludes</c> on the CLI.

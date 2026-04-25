@@ -343,6 +343,49 @@ public sealed class JsonContractTests
     }
 
     [Fact]
+    public void StatusResponse_WithIndexStatus_RoundTripsStats()
+    {
+        var status = new StatusResponse(
+            DaemonVersion: "0.1.0-s3",
+            SchemaVersion: 4,
+            Pid: 7,
+            RepoRoot: @"C:\tmp",
+            RepoId: "a1b2c3d4e5f6",
+            StartedAt: DateTimeOffset.UnixEpoch,
+            Freshness: new Freshness("abc", "abc", 0, null, false),
+            Index: new IndexStatus(
+                IndexedFileCount: 12,
+                MaxIndexableFileBytes: 4096,
+                InitialScanInProgress: true,
+                IncludeGlobs: new[] { "**/*.cs" },
+                ExcludeGlobs: new[] { "**/bin/**" },
+                Skips: new IndexSkipStats(
+                    Total: 1,
+                    ByReason: new[] { new IndexSkipReasonCount("too_large", 1) },
+                    Samples: new[]
+                    {
+                        new IndexSkipSample(
+                            LogicalPath: "huge.bin",
+                            Reason: "too_large",
+                            SizeBytes: 8192,
+                            Detail: "too big",
+                            ObservedAt: DateTimeOffset.UnixEpoch),
+                    })));
+
+        var json = JsonSerializer.Serialize(status, Context.StatusResponse);
+        var round = JsonSerializer.Deserialize(json, Context.StatusResponse)!;
+
+        AssertJsonRoundTrip(status, Context.StatusResponse);
+        Assert.Contains("\"index\":", json);
+        Assert.Contains("\"initialScanInProgress\":true", json);
+        Assert.Contains("\"reason\":\"too_large\"", json);
+        Assert.Contains("\"includeGlobs\":[\"**/*.cs\"]", json);
+        Assert.NotNull(round.Index);
+        Assert.Equal(12, round.Index!.IndexedFileCount);
+    }
+
+
+    [Fact]
     public void OptimizerStats_ZeroState_OmitsNullTimestampAndElapsed()
     {
         // Immediately after daemon start — MergeCount = 0, the two nullable

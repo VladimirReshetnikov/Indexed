@@ -10,37 +10,49 @@ public static class TargetSpecFactory
         string repoRoot,
         IReadOnlyList<string>? indexExcludeGlobs = null,
         bool useDefaultIndexExcludes = true,
-        bool useDefaultDirectoryExcludes = false)
+        bool useDefaultDirectoryExcludes = false,
+        IReadOnlyList<string>? indexIncludeGlobs = null,
+        long maxIndexableFileBytes = TargetIndexDefaults.DefaultMaxIndexableFileBytes)
         => CreateCore(
             TargetKind.GitRepository,
             new[] { new TargetRootSpec(Name: null, Path: repoRoot) },
+            indexIncludeGlobs,
             indexExcludeGlobs,
             useDefaultIndexExcludes,
-            useDefaultDirectoryExcludes);
+            useDefaultDirectoryExcludes,
+            maxIndexableFileBytes);
 
     public static TargetSpec CreateDirectoryTree(
         string root,
         IReadOnlyList<string>? indexExcludeGlobs = null,
         bool useDefaultIndexExcludes = true,
-        bool useDefaultDirectoryExcludes = true)
+        bool useDefaultDirectoryExcludes = true,
+        IReadOnlyList<string>? indexIncludeGlobs = null,
+        long maxIndexableFileBytes = TargetIndexDefaults.DefaultMaxIndexableFileBytes)
         => CreateCore(
             TargetKind.DirectoryTree,
             new[] { new TargetRootSpec(Name: null, Path: root) },
+            indexIncludeGlobs,
             indexExcludeGlobs,
             useDefaultIndexExcludes,
-            useDefaultDirectoryExcludes);
+            useDefaultDirectoryExcludes,
+            maxIndexableFileBytes);
 
     public static TargetSpec CreateDirectorySet(
         IReadOnlyList<TargetRootSpec> roots,
         IReadOnlyList<string>? indexExcludeGlobs = null,
         bool useDefaultIndexExcludes = true,
-        bool useDefaultDirectoryExcludes = true)
+        bool useDefaultDirectoryExcludes = true,
+        IReadOnlyList<string>? indexIncludeGlobs = null,
+        long maxIndexableFileBytes = TargetIndexDefaults.DefaultMaxIndexableFileBytes)
         => CreateCore(
             TargetKind.DirectorySet,
             roots,
+            indexIncludeGlobs,
             indexExcludeGlobs,
             useDefaultIndexExcludes,
-            useDefaultDirectoryExcludes);
+            useDefaultDirectoryExcludes,
+            maxIndexableFileBytes);
 
     public static IReadOnlyList<TargetRoot> MaterializeRoots(TargetSpec spec)
     {
@@ -60,28 +72,40 @@ public static class TargetSpecFactory
             && string.IsNullOrEmpty(spec.Roots[0].Name)
             && spec.UseDefaultIndexExcludes
             && !spec.UseDefaultDirectoryExcludes
+            && spec.MaxIndexableFileBytes == TargetIndexDefaults.DefaultMaxIndexableFileBytes
+            && (spec.IndexIncludeGlobs is null || spec.IndexIncludeGlobs.Count == 0)
             && (spec.IndexExcludeGlobs is null || spec.IndexExcludeGlobs.Count == 0);
     }
 
     private static TargetSpec CreateCore(
         TargetKind kind,
         IReadOnlyList<TargetRootSpec> roots,
+        IReadOnlyList<string>? indexIncludeGlobs,
         IReadOnlyList<string>? indexExcludeGlobs,
         bool useDefaultIndexExcludes,
-        bool useDefaultDirectoryExcludes)
+        bool useDefaultDirectoryExcludes,
+        long maxIndexableFileBytes)
     {
         if (roots is null) throw new ArgumentNullException(nameof(roots));
         if (roots.Count == 0) throw new ArgumentException("at least one root is required", nameof(roots));
+        if (maxIndexableFileBytes <= 0)
+            throw new ArgumentOutOfRangeException(
+                nameof(maxIndexableFileBytes),
+                maxIndexableFileBytes,
+                "maximum indexable file size must be positive");
 
         var normalizedRoots = NormalizeRoots(kind, roots);
-        var normalizedGlobs = NormalizeExcludeGlobs(indexExcludeGlobs);
+        var normalizedIncludes = NormalizeGlobs(indexIncludeGlobs);
+        var normalizedExcludes = NormalizeGlobs(indexExcludeGlobs);
 
         return new TargetSpec(
             Kind: kind,
             Roots: normalizedRoots,
-            IndexExcludeGlobs: normalizedGlobs,
+            IndexIncludeGlobs: normalizedIncludes,
+            IndexExcludeGlobs: normalizedExcludes,
             UseDefaultIndexExcludes: useDefaultIndexExcludes,
-            UseDefaultDirectoryExcludes: useDefaultDirectoryExcludes);
+            UseDefaultDirectoryExcludes: useDefaultDirectoryExcludes,
+            MaxIndexableFileBytes: maxIndexableFileBytes);
     }
 
     private static IReadOnlyList<TargetRootSpec> NormalizeRoots(TargetKind kind, IReadOnlyList<TargetRootSpec> roots)
@@ -118,12 +142,12 @@ public static class TargetSpecFactory
         return ordered;
     }
 
-    private static IReadOnlyList<string>? NormalizeExcludeGlobs(IReadOnlyList<string>? indexExcludeGlobs)
+    private static IReadOnlyList<string>? NormalizeGlobs(IReadOnlyList<string>? globs)
     {
-        if (indexExcludeGlobs is null || indexExcludeGlobs.Count == 0)
+        if (globs is null || globs.Count == 0)
             return null;
 
-        return indexExcludeGlobs
+        return globs
             .Where(static glob => !string.IsNullOrWhiteSpace(glob))
             .Select(static glob => glob.Trim())
             .Distinct(StringComparer.Ordinal)

@@ -30,10 +30,16 @@ public static class TargetId
 
         WriteField(writer, spec.UseDefaultIndexExcludes ? "1" : "0");
         WriteField(writer, spec.UseDefaultDirectoryExcludes ? "1" : "0");
+        WriteField(writer, spec.MaxIndexableFileBytes.ToString(CultureInfo.InvariantCulture));
 
-        var globs = spec.IndexExcludeGlobs ?? Array.Empty<string>();
-        WriteField(writer, globs.Count.ToString(CultureInfo.InvariantCulture));
-        foreach (var glob in globs)
+        var includeGlobs = spec.IndexIncludeGlobs ?? Array.Empty<string>();
+        WriteField(writer, includeGlobs.Count.ToString(CultureInfo.InvariantCulture));
+        foreach (var glob in includeGlobs)
+            WriteField(writer, glob);
+
+        var excludeGlobs = spec.IndexExcludeGlobs ?? Array.Empty<string>();
+        WriteField(writer, excludeGlobs.Count.ToString(CultureInfo.InvariantCulture));
+        foreach (var glob in excludeGlobs)
             WriteField(writer, glob);
 
         writer.Flush();

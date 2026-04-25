@@ -15,7 +15,11 @@ using Microsoft.Extensions.Logging;
 //   --root <label=dir> [--root ...]     Multi-root directory-set target
 //   --idle-timeout-seconds <n>   Override the 30-minute idle-exit window.
 //   --app-data <dir>             Override %LOCALAPPDATA%\Indexed for tests.
+//   --include-index <glob>       Repeatable index-time includes.
 //   --exclude-index <glob>       Repeatable extra index-time excludes.
+//   --max-indexable-file-mb <n>  Override max indexable file size in MiB.
+//   --max-indexable-file-bytes <n>
+//                                Override max indexable file size in bytes.
 //   --no-default-excludes        Disable the binary-adjacent default excludes.
 //   --no-default-directory-excludes
 //                                Disable the directory-mode default excludes.

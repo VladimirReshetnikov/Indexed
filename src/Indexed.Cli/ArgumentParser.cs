@@ -25,10 +25,12 @@ namespace Indexed.Cli;
 ///                    [--context-before N] [--context-after N] [-C N]
 ///                    [--max-matches N] [--max-matches-per-file N]
 ///                    [--json] [--repo-root &lt;dir&gt;] [--root &lt;dir&gt;|&lt;label=dir&gt;]...
+///                    [--include-index &lt;g&gt;]* [--exclude-index &lt;g&gt;]*
+///                    [--max-indexable-file-mb N|--max-indexable-file-bytes N]
 ///                    [--idle-timeout-seconds N]
-/// idx status [--repo-root &lt;dir&gt;|--root &lt;dir&gt;|&lt;label=dir&gt; ...] [--json] [--idle-timeout-seconds N]
-/// idx rescan [--repo-root &lt;dir&gt;|--root &lt;dir&gt;|&lt;label=dir&gt; ...]
-/// idx stop [--repo-root &lt;dir&gt;|--root &lt;dir&gt;|&lt;label=dir&gt; ...]
+/// idx status [--repo-root &lt;dir&gt;|--root &lt;dir&gt;|&lt;label=dir&gt; ...] [--json] [daemon options]
+/// idx rescan [--repo-root &lt;dir&gt;|--root &lt;dir&gt;|&lt;label=dir&gt; ...] [daemon options]
+/// idx stop [--repo-root &lt;dir&gt;|--root &lt;dir&gt;|&lt;label=dir&gt; ...] [daemon options]
 /// idx daemons [--json]
 /// idx --help | idx -h
 /// </code>
@@ -61,7 +63,9 @@ public static class ArgumentParser
         var caseSensitive = false;
         string? pathGlob = null;
         List<string>? excludeGlob = null;
+        List<string>? indexIncludeGlob = null;
         List<string>? indexExcludeGlob = null;
+        long? maxIndexableFileBytes = null;
         var noDefaultExcludes = false;
         List<SpanKind>? kindFilter = null;
         var contextBefore = 0;
@@ -106,8 +110,20 @@ public static class ArgumentParser
                     case "--exclude":
                         (excludeGlob ??= new List<string>()).Add(TakeArg(ref i, a)!);
                         break;
+                    case "--include-index":
+                        (indexIncludeGlob ??= new List<string>()).Add(TakeArg(ref i, a)!);
+                        break;
                     case "--exclude-index":
                         (indexExcludeGlob ??= new List<string>()).Add(TakeArg(ref i, a)!);
+                        break;
+                    case "--max-indexable-file-bytes":
+                        maxIndexableFileBytes = ParseLong(TakeArg(ref i, a)!, a, positive: true);
+                        break;
+                    case "--max-indexable-file-mb":
+                        checked
+                        {
+                            maxIndexableFileBytes = ParseLong(TakeArg(ref i, a)!, a, positive: true) * 1024L * 1024L;
+                        }
                         break;
                     case "--no-default-excludes":
                         noDefaultExcludes = true;
@@ -183,7 +199,9 @@ public static class ArgumentParser
                 caseSensitive,
                 pathGlob,
                 excludeGlob,
+                indexIncludeGlob,
                 indexExcludeGlob,
+                maxIndexableFileBytes,
                 noDefaultExcludes,
                 kindFilter,
                 contextBefore,
@@ -204,7 +222,9 @@ public static class ArgumentParser
                 CaseSensitive = caseSensitive,
                 PathGlob = pathGlob,
                 ExcludeGlob = excludeGlob,
+                IndexIncludeGlob = indexIncludeGlob,
                 IndexExcludeGlob = indexExcludeGlob,
+                MaxIndexableFileBytes = maxIndexableFileBytes,
                 NoDefaultExcludes = noDefaultExcludes,
                 NoDefaultDirectoryExcludes = noDefaultDirectoryExcludes,
                 KindFilter = kindFilter,
@@ -219,6 +239,10 @@ public static class ArgumentParser
             };
         }
         catch (ArgumentParseException ex)
+        {
+            return new CliArguments { Command = CliCommand.Help, Diagnostic = ex.Message };
+        }
+        catch (OverflowException ex)
         {
             return new CliArguments { Command = CliCommand.Help, Diagnostic = ex.Message };
         }
@@ -252,6 +276,21 @@ public static class ArgumentParser
         return n;
     }
 
+    private static long ParseLong(string s, string flag, bool positive)
+    {
+        if (!long.TryParse(s, out var n))
+            throw new ArgumentParseException($"{flag} expects an integer; got '{s}'");
+        if (positive ? n <= 0 : n < 0)
+        {
+            throw new ArgumentParseException(
+                positive
+                    ? $"{flag} must be positive; got {n}"
+                    : $"{flag} must be non-negative; got {n}");
+        }
+
+        return n;
+    }
+
     private static IReadOnlyList<TargetRootSpec>? NormalizeRoots(List<string>? rootArgs)
     {
         if (rootArgs is null || rootArgs.Count == 0)
@@ -279,7 +318,9 @@ public static class ArgumentParser
         bool caseSensitive,
         string? pathGlob,
         IReadOnlyList<string>? excludeGlob,
+        IReadOnlyList<string>? indexIncludeGlob,
         IReadOnlyList<string>? indexExcludeGlob,
+        long? maxIndexableFileBytes,
         bool noDefaultExcludes,
         IReadOnlyList<SpanKind>? kindFilter,
         int contextBefore,
@@ -301,7 +342,9 @@ public static class ArgumentParser
             || caseSensitive
             || pathGlob is not null
             || excludeGlob is { Count: > 0 }
+            || indexIncludeGlob is { Count: > 0 }
             || indexExcludeGlob is { Count: > 0 }
+            || maxIndexableFileBytes is not null
             || noDefaultExcludes
             || noDefaultDirectoryExcludes
             || kindFilter is { Count: > 0 }
@@ -332,15 +375,12 @@ public static class ArgumentParser
           idx stop [--repo-root <dir>] [--root <dir>|<label=dir>]...
           idx daemons [--json]
 
-        find options:
+        query options:
           --mode <auto|code|prose>      query mode (default: auto)
           --regex, -e                   treat pattern as regex
           --case-sensitive, -s          case-sensitive match
           --glob, -g <glob>             restrict to paths matching glob
           --exclude <glob>              exclude paths (repeatable)
-          --exclude-index <glob>        skip files from indexing (repeatable)
-          --no-default-excludes         do not apply built-in default exclude list
-                                          (lockfiles, minified bundles, generated C#)
           --kind <kind>                 filter by span kind (repeatable)
           --context-before, -B <n>      lines of leading context
           --context-after,  -A <n>      lines of trailing context
@@ -348,8 +388,17 @@ public static class ArgumentParser
           --max-matches <n>             global cap (default 200)
           --max-matches-per-file <n>    per-file cap (default 20)
           --json                        emit raw JSON response
+
+        daemon launch options:
           --repo-root <dir>             override repository root (git mode)
           --root <dir>|<label=dir>      select directory target roots
+          --include-index <glob>        only index files matching glob (repeatable)
+          --exclude-index <glob>        skip files from indexing (repeatable)
+          --max-indexable-file-mb <n>   daemon file-size cap in MiB (new daemon only)
+          --max-indexable-file-bytes <n>
+                                        daemon file-size cap in bytes (new daemon only)
+          --no-default-excludes         do not apply built-in default exclude list
+                                          (lockfiles, minified bundles, generated C#)
           --idle-timeout-seconds <n>    daemon idle timeout override (new daemon only)
           --no-default-directory-excludes
                                         do not apply directory-mode default excludes

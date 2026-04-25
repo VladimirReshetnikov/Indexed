@@ -93,6 +93,35 @@ public sealed class DaemonCommandLineTests : IDisposable
     }
 
     [Fact]
+    public void IndexIncludeAndSizeCap_ParseForGitMode()
+    {
+        var options = DaemonCommandLine.ParseOptions(new[]
+        {
+            "--repo-root", @"C:\repo",
+            "--include-index", "**/*.cs",
+            "--max-indexable-file-bytes", "4096",
+        });
+
+        Assert.Equal(new[] { "**/*.cs" }, options.IndexIncludeGlobs);
+        Assert.Equal(4096, options.MaxIndexableFileBytes);
+    }
+
+    [Fact]
+    public void IndexIncludeAndSizeCap_ParseForDirectoryMode()
+    {
+        var options = DaemonCommandLine.ParseOptions(new[]
+        {
+            "--root", @"C:\tree",
+            "--include-index", "**/*.md",
+            "--max-indexable-file-mb", "2",
+        });
+
+        Assert.NotNull(options.TargetSelection);
+        Assert.Equal(new[] { "**/*.md" }, options.TargetSelection!.IndexIncludeGlobs);
+        Assert.Equal(2L * 1024 * 1024, options.TargetSelection.MaxIndexableFileBytes);
+    }
+
+    [Fact]
     public void RepoRoot_And_Root_AreRejected()
     {
         var ex = Assert.Throws<ArgumentException>(() => DaemonCommandLine.ParseOptions(new[]

@@ -1,3 +1,5 @@
+using Indexed.Targets;
+
 namespace Indexed.Core;
 
 /// <summary>
@@ -33,5 +35,5 @@ public static class IndexLimits
     /// (single allocation) and slows FTS5 tokenization for minimal search
     /// benefit on such files.
     /// </remarks>
-    public const long MaxIndexableFileBytes = 50L * 1024 * 1024;
+    public const long MaxIndexableFileBytes = TargetIndexDefaults.DefaultMaxIndexableFileBytes;
 }

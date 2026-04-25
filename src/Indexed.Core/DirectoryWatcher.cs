@@ -29,7 +29,7 @@ public sealed class DirectoryWatcher : IDisposable
     private readonly IIndexTarget _target;
     private readonly DebouncingEventQueue _queue;
     private readonly ILogger _logger;
-    private readonly ExcludeFilter _excludeFilter;
+    private readonly IndexPathFilter _pathFilter;
     private readonly List<FileSystemWatcher> _watchers = new();
 
     public DirectoryWatcher(
@@ -37,11 +37,20 @@ public sealed class DirectoryWatcher : IDisposable
         DebouncingEventQueue queue,
         IReadOnlyList<string>? excludeGlobs = null,
         ILogger? logger = null)
+        : this(target, queue, new IndexingOptions(excludeGlobs: excludeGlobs), logger)
+    {
+    }
+
+    public DirectoryWatcher(
+        IIndexTarget target,
+        DebouncingEventQueue queue,
+        IndexingOptions options,
+        ILogger? logger = null)
     {
         _target = target ?? throw new ArgumentNullException(nameof(target));
         _queue = queue ?? throw new ArgumentNullException(nameof(queue));
         _logger = logger ?? NullLogger.Instance;
-        _excludeFilter = new ExcludeFilter(excludeGlobs);
+        _pathFilter = new IndexPathFilter(options ?? throw new ArgumentNullException(nameof(options)));
     }
 
     /// <summary>Start watching all target roots. Idempotent.</summary>
@@ -179,7 +188,7 @@ public sealed class DirectoryWatcher : IDisposable
             return true;
         }
 
-        return _excludeFilter.IsExcluded(logicalPath);
+        return !_pathFilter.ShouldIndex(logicalPath);
     }
 
     private sealed record WatchRootState(TargetRoot Root)

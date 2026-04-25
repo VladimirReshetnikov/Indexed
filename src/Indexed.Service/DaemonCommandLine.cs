@@ -15,6 +15,8 @@ internal static class DaemonCommandLine
         string? repoRoot = null;
         string? appData = null;
         var idleSeconds = (int)TimeSpan.FromMinutes(30).TotalSeconds;
+        long maxIndexableFileBytes = TargetIndexDefaults.DefaultMaxIndexableFileBytes;
+        var includeGlobs = new List<string>();
         var excludeGlobs = new List<string>();
         var useDefaultExcludes = true;
         var useDefaultDirectoryExcludes = true;
@@ -51,8 +53,23 @@ internal static class DaemonCommandLine
                 case "--app-data":
                     appData = TakeArg(ref i, args[i]);
                     break;
+                case "--include-index":
+                    includeGlobs.Add(TakeArg(ref i, args[i]));
+                    break;
                 case "--exclude-index":
                     excludeGlobs.Add(TakeArg(ref i, args[i]));
+                    break;
+                case "--max-indexable-file-bytes":
+                    if (!long.TryParse(TakeArg(ref i, args[i]), out maxIndexableFileBytes) || maxIndexableFileBytes <= 0)
+                        throw new ArgumentException("--max-indexable-file-bytes requires a positive integer", nameof(args));
+                    break;
+                case "--max-indexable-file-mb":
+                    if (!long.TryParse(TakeArg(ref i, args[i]), out var maxMb) || maxMb <= 0)
+                        throw new ArgumentException("--max-indexable-file-mb requires a positive integer", nameof(args));
+                    checked
+                    {
+                        maxIndexableFileBytes = maxMb * 1024L * 1024L;
+                    }
                     break;
                 case "--no-default-excludes":
                     useDefaultExcludes = false;
@@ -89,16 +106,20 @@ internal static class DaemonCommandLine
                 ? new TargetSelection
                 {
                     Roots = roots,
+                    IndexIncludeGlobs = includeGlobs.Count > 0 ? includeGlobs : null,
                     IndexExcludeGlobs = excludeGlobs.Count > 0 ? excludeGlobs : null,
                     UseDefaultIndexExcludes = useDefaultExcludes,
                     UseDefaultDirectoryExcludes = useDefaultDirectoryExcludes,
+                    MaxIndexableFileBytes = maxIndexableFileBytes,
                 }
                 : null,
             AppDataBase = appData,
             IdleTimeout = TimeSpan.FromSeconds(idleSeconds),
+            IndexIncludeGlobs = roots is null && includeGlobs.Count > 0 ? includeGlobs : null,
             IndexExcludeGlobs = roots is null && excludeGlobs.Count > 0 ? excludeGlobs : null,
             UseDefaultIndexExcludes = useDefaultExcludes,
             UseDefaultDirectoryExcludes = roots is not null && useDefaultDirectoryExcludes,
+            MaxIndexableFileBytes = maxIndexableFileBytes,
         };
     }
 }

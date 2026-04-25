@@ -33,13 +33,17 @@ public sealed class DirectorySetIndexTarget : IIndexTarget
         IReadOnlyList<TargetRootSpec> roots,
         IReadOnlyList<string>? indexExcludeGlobs = null,
         bool useDefaultIndexExcludes = true,
-        bool useDefaultDirectoryExcludes = true)
+        bool useDefaultDirectoryExcludes = true,
+        IReadOnlyList<string>? indexIncludeGlobs = null,
+        long maxIndexableFileBytes = TargetIndexDefaults.DefaultMaxIndexableFileBytes)
     {
         var spec = TargetSpecFactory.CreateDirectorySet(
             roots,
             indexExcludeGlobs,
             useDefaultIndexExcludes,
-            useDefaultDirectoryExcludes);
+            useDefaultDirectoryExcludes,
+            indexIncludeGlobs,
+            maxIndexableFileBytes);
         return new DirectorySetIndexTarget(
             spec,
             Indexed.Targets.TargetId.Compute(spec),

@@ -1,7 +1,8 @@
 # Indexed — Usage Guide
 
 - Created (UTC): 2026-04-15T17:00:00Z
-- Repository HEAD: cd463ca87356b067e49fe274a1ebcb6e92376c1d
+- Updated (UTC): 2026-04-25T20:12:31Z
+- Repository HEAD: 8d573b569cd63e77dea836599ba58819022d3074
 
 ## 1. Overview
 
@@ -93,7 +94,10 @@ These options can be passed to **any** verb. They only take effect when that
 invocation launches a new daemon; if an existing daemon is adopted via
 `daemon.json`, the already-running daemon's settings remain in effect.
 
+- `--include-index <glob>` (repeatable)
 - `--exclude-index <glob>` (repeatable)
+- `--max-indexable-file-mb <n>`
+- `--max-indexable-file-bytes <n>`
 - `--no-default-excludes`
 - `--no-default-directory-excludes` (directory targets only)
 - `--idle-timeout-seconds <n>`
@@ -115,7 +119,10 @@ idx find <pattern> [--mode auto|code|prose]
                    [--case-sensitive | -s]
                    [--glob | -g <glob>]
                    [--exclude <glob>]*
+                   [--include-index <glob>]*
                    [--exclude-index <glob>]*
+                   [--max-indexable-file-mb <n>]
+                   [--max-indexable-file-bytes <n>]
                    [--no-default-excludes]
                    [--kind <kind>]*
                    [--context-before | -B <n>]
@@ -138,7 +145,10 @@ idx find <pattern> [--mode auto|code|prose]
 | `--case-sensitive`, `-s` | off | Case-sensitive matching. Ignored in prose mode. |
 | `--glob`, `-g` | none | Restrict search to files matching this glob (e.g., `src/**/*.cs`). |
 | `--exclude` | none | Exclude files matching this glob from query results. Repeatable. |
+| `--include-index` | all files | Include only files matching at least one index-time glob. Repeatable. Passed to the daemon at launch. |
 | `--exclude-index` | none | Exclude files from indexing entirely. Repeatable. Passed to the daemon at launch. |
+| `--max-indexable-file-mb` | 50 | Maximum file size accepted into the index, in MiB. Passed to the daemon at launch. |
+| `--max-indexable-file-bytes` | 52,428,800 | Exact byte form of the same daemon launch setting. |
 | `--no-default-excludes` | off | Do not apply the built-in default exclude list (lockfiles, minified bundles, generated C#). See §5.2 for the full list. |
 | `--kind` | all | Filter results by span kind: `code`, `markdown`, `plain-text`, `xml-doc`, `line-comment-block`, `block-comment`. Repeatable. |
 | `-B`, `--context-before` | 0 | Lines of context before each match. |
@@ -224,7 +234,7 @@ idx status --json
 **Text output:**
 
 ```
-daemon v0.1.0 pid=12345 schema=3
+daemon v0.1.0 pid=12345 schema=4
 target  GitRepository a1b2c3d4e5f6
 root    C:\Tools2\Tools
 repo    C:\Tools2\Tools
@@ -232,6 +242,8 @@ repoId  a1b2c3d4e5f6
 started 2026-04-15T10:00:00.0000000+00:00
 rev     kind=Git current=abc123def456..., indexed=abc123def456...
 stale   False (pending=0)
+files   indexed=12403 skipped=2 maxFileBytes=52428800
+skips   too_large=2
 recon   2026-04-15T10:05:00.0000000+00:00
 ```
 
@@ -275,7 +287,7 @@ Returns daemon health and freshness metadata.
 ```json
 {
   "daemonVersion": "0.1.0",
-  "schemaVersion": 3,
+  "schemaVersion": 4,
   "pid": 12345,
   "targetKind": "GitRepository",
   "targetId": "a1b2c3d4e5f6",
@@ -304,6 +316,37 @@ Returns daemon health and freshness metadata.
     "currentRevisionToken": "abc123def456...",
     "revisionKind": "Git",
     "lastReconciliationAt": "2026-04-15T10:05:00Z"
+  },
+  "index": {
+    "indexedFileCount": 12403,
+    "maxIndexableFileBytes": 52428800,
+    "initialScanInProgress": false,
+    "includeGlobs": [
+      "**/*.cs",
+      "docs/**/*.md"
+    ],
+    "excludeGlobs": [
+      "**/bin/**",
+      "**/obj/**"
+    ],
+    "skips": {
+      "total": 2,
+      "byReason": [
+        {
+          "reason": "too_large",
+          "count": 2
+        }
+      ],
+      "samples": [
+        {
+          "logicalPath": "docs/huge-generated.md",
+          "reason": "too_large",
+          "sizeBytes": 73400320,
+          "detail": "size 73400320 bytes exceeds cap 52428800 bytes",
+          "observedAt": "2026-04-15T10:00:12+00:00"
+        }
+      ]
+    }
   }
 }
 ```
@@ -429,9 +472,10 @@ The `idx` CLI handles this automatically. Agents that use the HTTP API directly 
 Every response includes a `freshness` block. Recommended agent workflow:
 
 1. Send `POST /search`.
-2. Check `freshness.isStale`. If `true` and the result quality matters, wait 200–500 ms and retry.
-3. If `pendingFileCount > 0`, the index is still catching up to recent edits.
-4. If `indexedHead != currentHead`, a HEAD change (branch switch, commit) has not been fully processed yet.
+2. Check `freshness.isStale`. If `true` and the result quality matters, retry after a short delay.
+3. If `index.initialScanInProgress` is `true`, the daemon is still building the first full snapshot.
+4. If `pendingFileCount > 0`, the index is still catching up to recent edits.
+5. If `indexedHead != currentHead`, a HEAD change (branch switch, commit) has not been fully processed yet.
 
 ### 4.3 Example: Claude Code integration
 
@@ -458,7 +502,10 @@ The daemon accepts these command-line arguments (via `Indexed.Service` `Program.
 | `--root` | (repeatable) | Directory target root selector (`<dir>` or `LABEL=PATH`) |
 | `--idle-timeout-seconds` | 1800 (30 min) | Seconds of inactivity before daemon exits |
 | `--app-data` | `%LOCALAPPDATA%\Indexed` | Base directory for state files |
+| `--include-index` | (all files) | Glob patterns to include in indexing. When present, files must match at least one include glob before excludes are evaluated |
 | `--exclude-index` | (none) | Glob patterns to exclude from indexing (repeatable) |
+| `--max-indexable-file-mb` | 50 | Maximum indexable file size in MiB |
+| `--max-indexable-file-bytes` | 52,428,800 | Exact byte form of the same cap |
 | `--no-default-excludes` | off | Do not apply the built-in default exclude list |
 | `--no-default-directory-excludes` | off | Directory targets only. Disable the directory-mode default excludes |
 
@@ -519,7 +566,17 @@ idx find "lockfileVersion"          # subsequent calls use the running daemon
 ```
 
 User-supplied `--exclude-index` globs always compose with (or without) the
-default list — they are not mutually exclusive.
+default list — they are not mutually exclusive. User-supplied `--include-index`
+globs are evaluated first and are useful for focused indexes such as source-only
+or docs-only targets:
+
+```bash
+idx status --root C:\src\workspace --include-index "src/**/*.cs" --include-index "tests/**/*.cs"
+```
+
+Index-time include/exclude settings participate in the target id. Starting the
+same root with a different include set, exclude set, default-exclude policy, or
+file-size cap creates a different target directory under `%LOCALAPPDATA%\Indexed`.
 
 ### 5.3 Directory-mode default excludes
 
@@ -577,12 +634,13 @@ Written atomically via temp-file + rename. Deleted on graceful shutdown. A stale
 
 ### 6.2 `index.db` structure
 
-SQLite database in WAL mode. Contains (schema version 3):
+SQLite database in WAL mode. Contains (schema version 4):
 
 | Table | Content |
 |-------|---------|
 | `roots` | Target roots: label, absolute path, primary-root flag |
 | `files` | File metadata keyed by `root_id + relative_path`, with stable `logical_path` returned to the caller |
+| `file_skips` | Non-indexable file telemetry keyed by logical path: reason, optional size/detail, and observation timestamp |
 | `code_fts` | FTS5 virtual table with trigram tokenizer; **contentless** (`content = ''`, `contentless_delete = 1`). Only the posting list is stored — match snippets are read from the working tree at query time. |
 | `prose_fts` | FTS5 virtual table with porter+unicode61 tokenizer for extracted prose spans |
 | `meta` | Key-value metadata: schema version, target identity, indexed revision token, scan/reconciliation timestamps |
@@ -599,9 +657,10 @@ sqlite3 "%LOCALAPPDATA%\Indexed\<targetId>\index.db" "SELECT logical_path FROM f
 
 On first start after an upgrade that bumps the schema version, the daemon
 detects the mismatch, deletes the existing `index.db` (and its `-wal` /
-`-shm` sidecars), and performs a full scan from scratch. The rebuild is
-typically under a minute for a small repo and a few minutes for a large one.
-No user action is required; only the first `/status` after upgrade is slow.
+`-shm` sidecars), and performs a full scan from scratch. The scan runs in the
+background: the daemon writes `daemon.json` and serves `/status` while
+`freshness.isStale` and `index.initialScanInProgress` report that indexing is
+still catching up. No user action is required.
 
 ### 6.4 Background index compaction
 
@@ -653,7 +712,7 @@ idx status   # restarts daemon and triggers full scan
 ### High memory or CPU
 
 **Possible causes**:
-- Large binary files slipping through the filter. Add `--exclude-index` patterns.
+- Large binary files slipping through the filter. Add `--exclude-index` patterns, tighten `--include-index`, or lower the max-indexable-file cap.
 - Very large repository (hundreds of thousands of files). Initial scan is CPU-intensive; subsequent incremental updates are cheap.
 - FileSystemWatcher buffer overflow causing repeated reconciliation. Check logs for FSW error events.
 
@@ -680,7 +739,7 @@ dotnet test --nologo -v q
 
 ## 8. Glob pattern syntax
 
-Indexed uses gitignore-style glob patterns for `--glob`, `--exclude`, and `--exclude-index`:
+Indexed uses gitignore-style glob patterns for `--glob`, `--exclude`, `--include-index`, and `--exclude-index`:
 
 | Pattern | Matches |
 |---------|---------|

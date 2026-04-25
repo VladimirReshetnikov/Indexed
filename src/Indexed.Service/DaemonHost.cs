@@ -84,6 +84,10 @@ internal sealed class DaemonHost : IAsyncDisposable
     private IdleExitTimer? _idleTimer;
     private DaemonInfo? _info;
     private IndexStatistics? _lastScan;
+    private IndexingOptions? _indexingOptions;
+    private Task? _initialScanTask;
+    private int _initialScanInProgress;
+    private string? _initialScanError;
     private DebouncingEventQueue? _eventQueue;
     private IncrementalIndexer? _incrementalIndexer;
     private DirectoryWatcher? _directoryWatcher;
@@ -117,9 +121,11 @@ internal sealed class DaemonHost : IAsyncDisposable
         var targetSelection = _options.TargetSelection ?? new TargetSelection
         {
             RepoRoot = _options.RepoRoot,
+            IndexIncludeGlobs = _options.IndexIncludeGlobs,
             IndexExcludeGlobs = _options.IndexExcludeGlobs,
             UseDefaultIndexExcludes = _options.UseDefaultIndexExcludes,
             UseDefaultDirectoryExcludes = _options.UseDefaultDirectoryExcludes,
+            MaxIndexableFileBytes = _options.MaxIndexableFileBytes,
         };
 
         _target = targetSelection.OpenTarget(cancellationToken);
@@ -134,70 +140,6 @@ internal sealed class DaemonHost : IAsyncDisposable
             AcquireMutex();
 
         BindListener();
-
-        if (_options.BackendOverride is not null)
-        {
-            _backend = _options.BackendOverride;
-        }
-        else
-        {
-            var effectiveExcludes = BuildEffectiveExcludes(_target.Spec);
-
-            _index = SqliteIndex.OpenOrCreate(_paths.IndexDbPath);
-            _index.SetMeta(Indexed.Core.SqliteSchema.MetaKey_RepoId, _repoId);
-
-            _eventQueue = new DebouncingEventQueue();
-
-            // Schema v2: FTS5 is contentless — the backend reads live content
-            // from disk at query time via FileContentProvider. Failed reads
-            // (missing, unreadable, oversize) are fed back into the event
-            // queue so the incremental indexer self-heals.
-            _incrementalIndexer = new IncrementalIndexer(
-                _target, _index, _eventQueue, effectiveExcludes, _logger);
-
-            // Background FTS5 segment merger. Subscribes to BatchCommitted so
-            // it only runs during idle periods that followed real write work.
-            _indexOptimizer = new IndexOptimizer(
-                _index,
-                _options.OptimizerInterval,
-                _options.OptimizerPageBudget,
-                _logger);
-
-            _incrementalIndexer.BatchCommitted += () => _idleTimer?.Poke();
-            _incrementalIndexer.BatchCommitted += () => _indexOptimizer?.NotifyDirty();
-            _incrementalIndexer.Start();
-
-            _directoryWatcher = new DirectoryWatcher(
-                _target, _eventQueue, effectiveExcludes, _logger);
-            _directoryWatcher.Start();
-
-            if (_repo is not null)
-            {
-                _revisionTracker = new HeadPoller(
-                    _repo, _index, _eventQueue, interval: null, _logger);
-                _revisionTracker.Start();
-            }
-
-            _reconciliationScheduler = new ReconciliationScheduler(
-                _eventQueue, interval: null, _logger);
-            _reconciliationScheduler.Start();
-
-            if (_options.RunInitialScan && _index.GetFileCount() == 0)
-            {
-                _logger.LogInformation("index is empty; running full scan");
-                var scanStarted = Stopwatch.StartNew();
-                var indexer = new FullScanIndexer(_target, _index, effectiveExcludes, _logger);
-                _lastScan = await indexer.RunAsync(progress: null, cancellationToken).ConfigureAwait(false);
-                _logger.LogInformation(
-                    "initial full scan complete: indexed={Indexed} skipped={Skipped} unchanged={Unchanged} total={Total} elapsed={ElapsedMs}ms",
-                    _lastScan.Indexed, _lastScan.Skipped, _lastScan.Unchanged, _lastScan.Total,
-                    scanStarted.ElapsedMilliseconds);
-            }
-
-            var contentProvider = new FileContentProvider(_target);
-            _backend = new SqliteSearchBackend(_index, BuildFreshness, contentProvider, _eventQueue);
-            _indexOptimizer.Start();
-        }
 
         _info = new DaemonInfo(
             Port: _listener!.Prefixes.Count == 0 ? 0 : ExtractPort(_listener),
@@ -218,6 +160,63 @@ internal sealed class DaemonHost : IAsyncDisposable
             _logger.LogInformation("idle-exit window elapsed; requesting shutdown");
             RequestShutdown();
         });
+
+        if (_options.BackendOverride is not null)
+        {
+            _backend = _options.BackendOverride;
+        }
+        else
+        {
+            _indexingOptions = BuildEffectiveIndexingOptions(_target.Spec);
+
+            _index = SqliteIndex.OpenOrCreate(_paths.IndexDbPath);
+            _index.SetMeta(Indexed.Core.SqliteSchema.MetaKey_RepoId, _repoId);
+
+            _eventQueue = new DebouncingEventQueue();
+
+            // Schema v2: FTS5 is contentless — the backend reads live content
+            // from disk at query time via FileContentProvider. Failed reads
+            // (missing, unreadable, oversize) are fed back into the event
+            // queue so the incremental indexer self-heals.
+            _incrementalIndexer = new IncrementalIndexer(
+                _target, _index, _eventQueue, _indexingOptions, _logger);
+
+            // Background FTS5 segment merger. Subscribes to BatchCommitted so
+            // it only runs during idle periods that followed real write work.
+            _indexOptimizer = new IndexOptimizer(
+                _index,
+                _options.OptimizerInterval,
+                _options.OptimizerPageBudget,
+                _logger);
+
+            _incrementalIndexer.BatchCommitted += () => _idleTimer?.Poke();
+            _incrementalIndexer.BatchCommitted += () => _indexOptimizer?.NotifyDirty();
+            _incrementalIndexer.Start();
+
+            _directoryWatcher = new DirectoryWatcher(
+                _target, _eventQueue, _indexingOptions, _logger);
+            _directoryWatcher.Start();
+
+            if (_repo is not null)
+            {
+                _revisionTracker = new HeadPoller(
+                    _repo, _index, _eventQueue, interval: null, _logger);
+                _revisionTracker.Start();
+            }
+
+            _reconciliationScheduler = new ReconciliationScheduler(
+                _eventQueue, interval: null, _logger);
+            _reconciliationScheduler.Start();
+
+            if (_options.RunInitialScan && _index.GetFileCount() == 0)
+            {
+                StartInitialScan(_indexingOptions);
+            }
+
+            var contentProvider = new FileContentProvider(_target, _indexingOptions.MaxIndexableFileBytes);
+            _backend = new SqliteSearchBackend(_index, BuildFreshness, contentProvider, _eventQueue);
+            _indexOptimizer.Start();
+        }
 
         _logger.LogInformation(
             "daemon listening on port {Port}, targetId={TargetId}, pid={Pid}",
@@ -312,6 +311,12 @@ internal sealed class DaemonHost : IAsyncDisposable
             try { await _incrementalIndexer.DisposeAsync().ConfigureAwait(false); } catch { }
         }
         _eventQueue?.Dispose();
+
+        if (_initialScanTask is not null)
+        {
+            try { await _initialScanTask.ConfigureAwait(false); } catch { }
+            _initialScanTask = null;
+        }
 
         // Dispose the optimizer AFTER the incremental indexer so the final
         // merge sees the last batch commit's dirty flag. Runs BEFORE the
@@ -504,6 +509,7 @@ internal sealed class DaemonHost : IAsyncDisposable
             StartedAt: _startedAt,
             Freshness: BuildFreshness(),
             Optimizer: BuildOptimizerStats(),
+            Index: BuildIndexStatus(),
             TargetKind: _target!.Spec.Kind,
             TargetId: _target.TargetId,
             Roots: _target.Roots,
@@ -525,6 +531,22 @@ internal sealed class DaemonHost : IAsyncDisposable
             MergeCount: opt.MergeCount,
             LastMergeAtUtc: opt.LastMergeAtUtc,
             LastMergeElapsedMs: opt.LastMergeElapsedMs);
+    }
+
+    private IndexStatus? BuildIndexStatus()
+    {
+        if (_index is null || _indexingOptions is null)
+            return null;
+
+        var skips = _index.GetSkipStats();
+        return new IndexStatus(
+            IndexedFileCount: _index.GetFileCount(),
+            MaxIndexableFileBytes: _indexingOptions.MaxIndexableFileBytes,
+            InitialScanInProgress: Volatile.Read(ref _initialScanInProgress) != 0,
+            IncludeGlobs: _indexingOptions.IncludeGlobs,
+            ExcludeGlobs: _indexingOptions.ExcludeGlobs,
+            Skips: skips,
+            InitialScanError: _initialScanError);
     }
 
     private Freshness BuildFreshness()
@@ -577,7 +599,8 @@ internal sealed class DaemonHost : IAsyncDisposable
         // freshness window briefly reports isStale=false for work that has
         // not yet been applied.
         var inFlight = _incrementalIndexer?.IsProcessingBatch ?? false;
-        var isStale = pendingCount > 0 || inFlight;
+        var initialScanInProgress = Volatile.Read(ref _initialScanInProgress) != 0;
+        var isStale = pendingCount > 0 || inFlight || initialScanInProgress || _initialScanError is not null;
         if (revisionKind != RevisionKind.None)
         {
             isStale = isStale
@@ -585,6 +608,11 @@ internal sealed class DaemonHost : IAsyncDisposable
                 || currentRevisionToken is null
                 || !string.Equals(indexedRevisionToken, currentRevisionToken, StringComparison.Ordinal);
         }
+
+        if (initialScanInProgress)
+            note = "initial full scan is still running.";
+        else if (_initialScanError is not null)
+            note = $"initial full scan failed: {_initialScanError}";
 
         return new Freshness(
             IndexedHead: indexedRevisionToken,
@@ -599,14 +627,53 @@ internal sealed class DaemonHost : IAsyncDisposable
             LastReconciliationAt: lastReconciliation);
     }
 
-    private static IReadOnlyList<string>? BuildEffectiveExcludes(TargetSpec spec)
+    private void StartInitialScan(IndexingOptions indexingOptions)
+    {
+        if (_target is null || _index is null)
+            throw new InvalidOperationException("target and index must be initialized before starting a full scan");
+
+        _logger.LogInformation("index is empty; scheduling initial full scan");
+        Volatile.Write(ref _initialScanInProgress, 1);
+        _initialScanError = null;
+
+        _initialScanTask = Task.Run(async () =>
+        {
+            var scanStarted = Stopwatch.StartNew();
+            try
+            {
+                var indexer = new FullScanIndexer(_target, _index, indexingOptions, _logger);
+                _lastScan = await indexer.RunAsync(progress: null, _shutdownCts.Token).ConfigureAwait(false);
+                _logger.LogInformation(
+                    "initial full scan complete: indexed={Indexed} skipped={Skipped} filtered={Filtered} unchanged={Unchanged} total={Total} elapsed={ElapsedMs}ms",
+                    _lastScan.Indexed, _lastScan.Skipped, _lastScan.Filtered, _lastScan.Unchanged, _lastScan.Total,
+                    scanStarted.ElapsedMilliseconds);
+                _indexOptimizer?.NotifyDirty();
+            }
+            catch (OperationCanceledException)
+            {
+                _logger.LogInformation("initial full scan canceled");
+            }
+            catch (Exception ex)
+            {
+                _initialScanError = ex.GetType().Name + ": " + ex.Message;
+                _logger.LogError(ex, "initial full scan failed");
+            }
+            finally
+            {
+                Volatile.Write(ref _initialScanInProgress, 0);
+                _idleTimer?.Poke();
+            }
+        });
+    }
+
+    private static IndexingOptions BuildEffectiveIndexingOptions(TargetSpec spec)
     {
         IReadOnlyList<string>? excludes = spec.IndexExcludeGlobs;
         if (spec.UseDefaultIndexExcludes)
             excludes = ExcludeFilter.Combine(excludes, ExcludeFilter.DefaultBinaryAdjacentGlobs);
         if (spec.UseDefaultDirectoryExcludes)
             excludes = ExcludeFilter.Combine(excludes, ExcludeFilter.DefaultDirectoryModeExcludes);
-        return excludes;
+        return new IndexingOptions(spec.IndexIncludeGlobs, excludes, spec.MaxIndexableFileBytes);
     }
 
     private void AcquireMutex()

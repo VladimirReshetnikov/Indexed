@@ -13,15 +13,15 @@ namespace Indexed.Core;
 
 /// <summary>
 /// Single-threaded indexer that walks every file in an <see cref="IIndexTarget"/>,
-/// filters out binaries and oversize blobs, computes SHA-256, and UPSERTs a
-/// <c>code_fts</c> row per file using the writer connection on
-/// <see cref="SqliteIndex"/>.
+/// applies the index path policy, classifies binaries and oversize blobs,
+/// computes SHA-256, UPSERTs indexable files, and records non-indexable files
+/// in <c>file_skips</c>.
 /// </summary>
 /// <remarks>
 /// <para>
 /// This class is the daemon's cold-start and rebuild path: when
-/// <see cref="DaemonHost"/> detects an empty or schema-mismatched DB it runs a
-/// full scan before serving queries. Ongoing edits are handled by
+/// <see cref="DaemonHost"/> detects an empty or schema-mismatched DB it schedules
+/// a full scan in the background. Ongoing edits are handled by
 /// <see cref="IncrementalIndexer"/>, but the full scan still owns the
 /// authoritative "enumerate everything and restamp the world" pass.
 /// </para>
@@ -29,9 +29,7 @@ namespace Indexed.Core;
 /// Transaction granularity: batches of up to <see cref="BatchFileCount"/>
 /// files or <see cref="BatchTimeBudget"/> elapsed time, whichever hits first.
 /// A transaction boundary is also forced at the end of the run. SQLite in WAL
-/// mode handles hundreds of small transactions without appreciable overhead,
-/// but one mega-transaction for tens of thousands of files keeps rebuilds
-/// snappy (&lt; 60 s for this repo per proposal §14).
+/// mode handles hundreds of small transactions without appreciable overhead.
 /// </para>
 /// <para>
 /// Progress reporting: <see cref="IndexProgress"/> instances are emitted via
@@ -61,7 +59,8 @@ public sealed class FullScanIndexer
     private readonly IIndexTarget _target;
     private readonly SqliteIndex _index;
     private readonly ILogger _logger;
-    private readonly ExcludeFilter _excludeFilter;
+    private readonly IndexingOptions _options;
+    private readonly IndexPathFilter _pathFilter;
     private readonly ExtractorRegistry _extractorRegistry;
     private readonly IExplicitBinaryPathProvider? _explicitBinaryPathProvider;
     private readonly IFileCountHintTarget? _fileCountHintTarget;
@@ -84,11 +83,22 @@ public sealed class FullScanIndexer
         IReadOnlyList<string>? excludeGlobs = null,
         ILogger? logger = null,
         ExtractorRegistry? extractorRegistry = null)
+        : this(target, index, new IndexingOptions(excludeGlobs: excludeGlobs), logger, extractorRegistry)
+    {
+    }
+
+    public FullScanIndexer(
+        IIndexTarget target,
+        SqliteIndex index,
+        IndexingOptions options,
+        ILogger? logger = null,
+        ExtractorRegistry? extractorRegistry = null)
     {
         _target = target ?? throw new ArgumentNullException(nameof(target));
         _index = index ?? throw new ArgumentNullException(nameof(index));
+        _options = options ?? throw new ArgumentNullException(nameof(options));
         _logger = logger ?? NullLogger.Instance;
-        _excludeFilter = new ExcludeFilter(excludeGlobs);
+        _pathFilter = new IndexPathFilter(_options);
         _extractorRegistry = extractorRegistry ?? ExtractorRegistry.BuildDefault();
         _explicitBinaryPathProvider = target as IExplicitBinaryPathProvider;
         _fileCountHintTarget = target as IFileCountHintTarget;
@@ -115,6 +125,19 @@ public sealed class FullScanIndexer
         var batchStart = DateTimeOffset.UtcNow;
         var filesInBatch = 0;
 
+        async Task NoteBatchWriteAsync()
+        {
+            filesInBatch++;
+            var batchExpired = DateTimeOffset.UtcNow - batchStart >= BatchTimeBudget;
+            if (filesInBatch < BatchFileCount && !batchExpired)
+                return;
+
+            await scope.DisposeAsync().ConfigureAwait(false);
+            scope = await _index.BeginWriteAsync(cancellationToken).ConfigureAwait(false);
+            batchStart = DateTimeOffset.UtcNow;
+            filesInBatch = 0;
+        }
+
         try
         {
             _rootIds = SqliteIndex.UpsertRoots(scope, _target.Roots);
@@ -124,10 +147,27 @@ public sealed class FullScanIndexer
                 cancellationToken.ThrowIfCancellationRequested();
                 var logicalPath = file.LogicalPath.Value;
 
-                if (_excludeFilter.IsExcluded(logicalPath)
-                    || explicitBinaryLogicalPaths.Contains(logicalPath)
-                    || BinaryFileClassifier.IsLikelyBinary(file.AbsolutePath))
+                if (!_pathFilter.ShouldIndex(logicalPath))
                 {
+                    stats.Filtered++;
+                    progress?.Report(new IndexProgress(logicalPath, stats.Indexed, stats.Skipped, stats.Total));
+                    continue;
+                }
+
+                if (explicitBinaryLogicalPaths.Contains(logicalPath))
+                {
+                    RecordSkip(scope, logicalPath, IndexSkipReason.ExplicitBinary, TryGetFileSize(file.AbsolutePath), null);
+                    await NoteBatchWriteAsync().ConfigureAwait(false);
+                    stats.Skipped++;
+                    progress?.Report(new IndexProgress(logicalPath, stats.Indexed, stats.Skipped, stats.Total));
+                    continue;
+                }
+
+                var classification = BinaryFileClassifier.Classify(file.AbsolutePath, _options.MaxIndexableFileBytes);
+                if (classification.Status != FileIndexabilityStatus.Text)
+                {
+                    RecordSkip(scope, logicalPath, ToSkipReason(classification.Status), classification.SizeBytes, classification.Detail);
+                    await NoteBatchWriteAsync().ConfigureAwait(false);
                     stats.Skipped++;
                     progress?.Report(new IndexProgress(logicalPath, stats.Indexed, stats.Skipped, stats.Total));
                     continue;
@@ -138,8 +178,21 @@ public sealed class FullScanIndexer
                 try
                 {
                     var info = new FileInfo(file.AbsolutePath);
-                    if (!info.Exists) { stats.Skipped++; continue; }
-                    if (info.Length > MaxIndexableFileBytes) { stats.Skipped++; continue; }
+                    if (!info.Exists)
+                    {
+                        RecordSkip(scope, logicalPath, IndexSkipReason.Missing, null, "file disappeared before stat");
+                        await NoteBatchWriteAsync().ConfigureAwait(false);
+                        stats.Skipped++;
+                        continue;
+                    }
+
+                    if (info.Length > _options.MaxIndexableFileBytes)
+                    {
+                        RecordSkip(scope, logicalPath, IndexSkipReason.TooLarge, info.Length, $"size {info.Length} bytes exceeds cap {_options.MaxIndexableFileBytes} bytes");
+                        await NoteBatchWriteAsync().ConfigureAwait(false);
+                        stats.Skipped++;
+                        continue;
+                    }
                     mtimeUtc = new DateTimeOffset(info.LastWriteTimeUtc, TimeSpan.Zero).ToUnixTimeSeconds();
 
                     // Compute SHA from a stream — avoids allocating the full byte[]
@@ -152,12 +205,16 @@ public sealed class FullScanIndexer
                 catch (IOException ex)
                 {
                     _logger.LogDebug(ex, "skip {Path}: {Message}", logicalPath, ex.Message);
+                    RecordSkip(scope, logicalPath, IndexSkipReason.Unreadable, null, ex.Message);
+                    await NoteBatchWriteAsync().ConfigureAwait(false);
                     stats.Skipped++;
                     continue;
                 }
                 catch (UnauthorizedAccessException ex)
                 {
                     _logger.LogDebug(ex, "skip {Path}: {Message}", logicalPath, ex.Message);
+                    RecordSkip(scope, logicalPath, IndexSkipReason.Unreadable, null, ex.Message);
+                    await NoteBatchWriteAsync().ConfigureAwait(false);
                     stats.Skipped++;
                     continue;
                 }
@@ -176,17 +233,27 @@ public sealed class FullScanIndexer
                 {
                     bytes = await File.ReadAllBytesAsync(file.AbsolutePath, cancellationToken).ConfigureAwait(false);
                     // Re-check after read: the file may have grown between stat and read.
-                    if (bytes.LongLength > MaxIndexableFileBytes) { stats.Skipped++; continue; }
+                    if (bytes.LongLength > _options.MaxIndexableFileBytes)
+                    {
+                        RecordSkip(scope, logicalPath, IndexSkipReason.TooLarge, bytes.LongLength, $"size {bytes.LongLength} bytes exceeds cap {_options.MaxIndexableFileBytes} bytes after read");
+                        await NoteBatchWriteAsync().ConfigureAwait(false);
+                        stats.Skipped++;
+                        continue;
+                    }
                 }
                 catch (IOException ex)
                 {
                     _logger.LogDebug(ex, "skip {Path}: {Message}", logicalPath, ex.Message);
+                    RecordSkip(scope, logicalPath, IndexSkipReason.Unreadable, null, ex.Message);
+                    await NoteBatchWriteAsync().ConfigureAwait(false);
                     stats.Skipped++;
                     continue;
                 }
                 catch (UnauthorizedAccessException ex)
                 {
                     _logger.LogDebug(ex, "skip {Path}: {Message}", logicalPath, ex.Message);
+                    RecordSkip(scope, logicalPath, IndexSkipReason.Unreadable, null, ex.Message);
+                    await NoteBatchWriteAsync().ConfigureAwait(false);
                     stats.Skipped++;
                     continue;
                 }
@@ -209,17 +276,8 @@ public sealed class FullScanIndexer
                 SqliteIndex.ReplaceProseSpans(scope, fileId, proseSpans);
 
                 stats.Indexed++;
-                filesInBatch++;
                 progress?.Report(new IndexProgress(logicalPath, stats.Indexed, stats.Skipped, stats.Total));
-
-                var batchExpired = DateTimeOffset.UtcNow - batchStart >= BatchTimeBudget;
-                if (filesInBatch >= BatchFileCount || batchExpired)
-                {
-                    await scope.DisposeAsync().ConfigureAwait(false);
-                    scope = await _index.BeginWriteAsync(cancellationToken).ConfigureAwait(false);
-                    batchStart = DateTimeOffset.UtcNow;
-                    filesInBatch = 0;
-                }
+                await NoteBatchWriteAsync().ConfigureAwait(false);
             }
 
         }
@@ -267,6 +325,40 @@ public sealed class FullScanIndexer
         catch { return null; }
     }
 
+    private void RecordSkip(WriterScope scope, string logicalPath, string reason, long? sizeBytes, string? detail)
+    {
+        SqliteIndex.DeleteIndexedFileByLogicalPath(scope, logicalPath);
+        SqliteIndex.RecordFileSkip(
+            scope,
+            logicalPath,
+            reason,
+            sizeBytes,
+            detail,
+            DateTimeOffset.UtcNow.ToUnixTimeSeconds());
+    }
+
+    private static long? TryGetFileSize(string absolutePath)
+    {
+        try
+        {
+            var info = new FileInfo(absolutePath);
+            return info.Exists ? info.Length : null;
+        }
+        catch (IOException) { return null; }
+        catch (UnauthorizedAccessException) { return null; }
+    }
+
+    private static string ToSkipReason(FileIndexabilityStatus status) => status switch
+    {
+        FileIndexabilityStatus.Missing => IndexSkipReason.Missing,
+        FileIndexabilityStatus.Directory => IndexSkipReason.Directory,
+        FileIndexabilityStatus.Oversize => IndexSkipReason.TooLarge,
+        FileIndexabilityStatus.Binary => IndexSkipReason.Binary,
+        FileIndexabilityStatus.Unreadable => IndexSkipReason.Unreadable,
+        FileIndexabilityStatus.Text => throw new ArgumentOutOfRangeException(nameof(status)),
+        _ => throw new ArgumentOutOfRangeException(nameof(status), status, "unknown indexability status"),
+    };
+
     private long GetRootId(TargetRoot root)
     {
         if (_rootIds is null)
@@ -293,6 +385,7 @@ public sealed class IndexStatistics
     public int? Total { get; set; }
     public int Indexed { get; set; }
     public int Skipped { get; set; }
+    public int Filtered { get; set; }
     public int Unchanged { get; set; }
     public TimeSpan Elapsed { get; set; }
 }

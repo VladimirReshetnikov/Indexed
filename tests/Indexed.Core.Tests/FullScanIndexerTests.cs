@@ -90,6 +90,63 @@ public sealed class FullScanIndexerTests : IDisposable
     }
 
     [Fact]
+    public async Task RunAsync_IncludeGlobsRestrictIndexedFiles()
+    {
+        var repo = InitRepo(new[]
+        {
+            ("a.cs", "alpha beta"),
+            ("readme.md", "alpha docs"),
+        });
+
+        var target = GitIndexTarget.Open(repo);
+        var dbPath = Path.Combine(_tempRoot, "include.db");
+        await using var index = SqliteIndex.OpenOrCreate(dbPath);
+
+        var stats = await new FullScanIndexer(
+            target,
+            index,
+            new IndexingOptions(includeGlobs: new[] { "**/*.cs" })).RunAsync();
+
+        Assert.Equal(1, stats.Indexed);
+        Assert.Equal(1, stats.Filtered);
+        Assert.Equal(1L, index.GetFileCount());
+
+        var candidates = await index.QueryCodeCandidatesAsync("\"alp\"", default);
+        var rows = await index.GetFilesAsync(candidates, default);
+        var row = Assert.Single(rows);
+        Assert.Equal("a.cs", row.LogicalPath);
+    }
+
+    [Fact]
+    public async Task RunAsync_RecordsOversizeSkips()
+    {
+        var repo = InitRepo(new[]
+        {
+            ("small.cs", "small-token"),
+            ("large.cs", "this file is over the tiny configured cap"),
+        });
+
+        var target = GitIndexTarget.Open(repo);
+        var dbPath = Path.Combine(_tempRoot, "skips.db");
+        await using var index = SqliteIndex.OpenOrCreate(dbPath);
+
+        await new FullScanIndexer(
+            target,
+            index,
+            new IndexingOptions(maxIndexableFileBytes: 16)).RunAsync();
+
+        Assert.Equal(1L, index.GetFileCount());
+        var skips = index.GetSkipStats();
+        Assert.Equal(1, skips.Total);
+        var reason = Assert.Single(skips.ByReason);
+        Assert.Equal(IndexSkipReason.TooLarge, reason.Reason);
+        Assert.Equal(1, reason.Count);
+        var sample = Assert.Single(skips.Samples);
+        Assert.Equal("large.cs", sample.LogicalPath);
+        Assert.Equal(IndexSkipReason.TooLarge, sample.Reason);
+    }
+
+    [Fact]
     public async Task RunAsync_SecondRun_AllUnchanged()
     {
         var repo = InitRepo(new[] { ("a.cs", "hello world") });

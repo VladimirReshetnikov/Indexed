@@ -59,6 +59,7 @@ public sealed record StatusResponse(
     DateTimeOffset StartedAt,
     Freshness Freshness,
     OptimizerStats? Optimizer = null,
+    IndexStatus? Index = null,
     TargetKind TargetKind = TargetKind.GitRepository,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.Never)] string? TargetId = null,
     IReadOnlyList<TargetRoot>? Roots = null,

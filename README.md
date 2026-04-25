@@ -3,7 +3,8 @@
 Background-indexed full-text search service for a local workspace target, aimed primarily at AI coding agents that need millisecond-class code search across a git repository, a standalone directory tree, or an explicit multi-directory workspace.
 
 - Created (UTC): 2026-04-15T17:00:00Z
-- Repository HEAD: e5c1e2b48eea1534033dbf6bcd549b2059db91e7
+- Updated (UTC): 2026-04-25T20:12:31Z
+- Repository HEAD: 8d573b569cd63e77dea836599ba58819022d3074
 
 ## Project goals
 
@@ -33,7 +34,8 @@ Background-indexed full-text search service for a local workspace target, aimed 
 - **Prose search** over extracted XML docs, comment blocks, Markdown, and plain-text files.
 - **Truthful `auto` mode** that merges code and prose results, preferring prose on exact same-line collisions.
 - **Path filtering** via gitignore-style globs: `--glob` and `--exclude`.
-- **Index-time exclusion** (`--exclude-index`) plus curated default excludes for lockfiles/minified/generated outputs.
+- **Index-time include/exclude filtering** (`--include-index`, `--exclude-index`) plus curated default excludes for lockfiles/minified/generated outputs.
+- **Configurable file-size cap** (`--max-indexable-file-mb` / `--max-indexable-file-bytes`) with status-visible non-indexable-file telemetry.
 - **Directory-tree and directory-set targets** via repeated `--root` flags, including continuous background indexing outside git.
 - **Context lines** (`-A`, `-B`, `-C`) without re-running a full scan per query.
 - **Kind-aware text output** for prose hits plus stable JSON contracts for agents.
@@ -44,7 +46,7 @@ Background-indexed full-text search service for a local workspace target, aimed 
 ## Known limitations
 
 - **Windows-only** today (`net10.0-windows`).
-- **File size cap**: files larger than 50 MiB are treated as non-indexable.
+- **Huge files are whole-file indexed today**: files larger than the configured cap are treated as non-indexable. The default cap is 50 MiB; raising it can increase memory use because current indexing still reads each accepted file as one byte array before tokenization.
 - **Multiline regex** is not supported (matches are line-oriented).
 - **Prose query syntax is FTS5 MATCH syntax**. `--mode prose` does not interpret `pattern` as a .NET regex; in `--mode auto`, `--regex` therefore runs the code side only.
 - **Directory-set queries use a logical-path namespace** (`label/relative/path`) that is stable once chosen; relabeling creates a distinct target.

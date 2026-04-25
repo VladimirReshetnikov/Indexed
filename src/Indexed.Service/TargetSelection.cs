@@ -12,11 +12,15 @@ public sealed record TargetSelection
 
     public IReadOnlyList<TargetRootSpec>? Roots { get; init; }
 
+    public IReadOnlyList<string>? IndexIncludeGlobs { get; init; }
+
     public IReadOnlyList<string>? IndexExcludeGlobs { get; init; }
 
     public bool UseDefaultIndexExcludes { get; init; } = true;
 
     public bool UseDefaultDirectoryExcludes { get; init; }
+
+    public long MaxIndexableFileBytes { get; init; } = TargetIndexDefaults.DefaultMaxIndexableFileBytes;
 
     public IIndexTarget OpenTarget(CancellationToken cancellationToken = default)
     {
@@ -32,12 +36,16 @@ public sealed record TargetSelection
                     Roots[0].Path,
                     IndexExcludeGlobs,
                     UseDefaultIndexExcludes,
-                    UseDefaultDirectoryExcludes)
+                    UseDefaultDirectoryExcludes,
+                    IndexIncludeGlobs,
+                    MaxIndexableFileBytes)
                 : DirectorySetIndexTarget.Open(
                     Roots,
                     IndexExcludeGlobs,
                     UseDefaultIndexExcludes,
-                    UseDefaultDirectoryExcludes);
+                    UseDefaultDirectoryExcludes,
+                    IndexIncludeGlobs,
+                    MaxIndexableFileBytes);
         }
 
         if (string.IsNullOrWhiteSpace(RepoRoot))
@@ -48,6 +56,8 @@ public sealed record TargetSelection
             IndexExcludeGlobs,
             UseDefaultIndexExcludes,
             UseDefaultDirectoryExcludes,
+            IndexIncludeGlobs,
+            MaxIndexableFileBytes,
             cancellationToken);
     }
 }

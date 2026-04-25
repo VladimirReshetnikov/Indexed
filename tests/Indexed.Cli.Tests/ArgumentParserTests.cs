@@ -333,6 +333,45 @@ public sealed class ArgumentParserTests
     }
 
     [Fact]
+    public void Find_IndexIncludeGlobs_Accumulate()
+    {
+        var r = ArgumentParser.Parse(new[]
+        {
+            "find", "foo", "--include-index", "**/*.cs", "--include-index", "docs/**/*.md",
+        });
+
+        Assert.Equal(CliCommand.Find, r.Command);
+        Assert.Equal(new[] { "**/*.cs", "docs/**/*.md" }, r.IndexIncludeGlob);
+    }
+
+    [Fact]
+    public void Find_MaxIndexableFileBytes_Parsed()
+    {
+        var r = ArgumentParser.Parse(new[] { "find", "foo", "--max-indexable-file-bytes", "12345" });
+
+        Assert.Equal(CliCommand.Find, r.Command);
+        Assert.Equal(12345, r.MaxIndexableFileBytes);
+    }
+
+    [Fact]
+    public void Find_MaxIndexableFileMb_ParsedAsBytes()
+    {
+        var r = ArgumentParser.Parse(new[] { "find", "foo", "--max-indexable-file-mb", "2" });
+
+        Assert.Equal(CliCommand.Find, r.Command);
+        Assert.Equal(2L * 1024 * 1024, r.MaxIndexableFileBytes);
+    }
+
+    [Fact]
+    public void Find_MaxIndexableFileBytes_RejectsZero()
+    {
+        var r = ArgumentParser.Parse(new[] { "find", "foo", "--max-indexable-file-bytes", "0" });
+
+        Assert.Equal(CliCommand.Help, r.Command);
+        Assert.Contains("positive", r.Diagnostic);
+    }
+
+    [Fact]
     public void Find_NoDefaultDirectoryExcludes_WithRoot_SetsTrue()
     {
         var r = ArgumentParser.Parse(new[]

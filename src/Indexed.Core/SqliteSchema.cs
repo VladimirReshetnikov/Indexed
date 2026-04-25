@@ -5,8 +5,9 @@ namespace Indexed.Core;
 /// </summary>
 /// <remarks>
 /// <para>
-/// Schema version 3 defines: <c>roots</c> (target roots persisted by absolute
+/// Schema version 4 defines: <c>roots</c> (target roots persisted by absolute
 /// path), <c>files</c> (authoritative logical-path/sha/language row),
+/// <c>file_skips</c> (non-indexable file telemetry),
 /// <c>code_fts</c> as a <em>contentless</em> FTS5 trigram index (tokenizes at
 /// write time but stores no content — snippets are rehydrated from the
 /// working tree at query time), <c>prose_fts</c> (FTS5 porter+unicode61,
@@ -37,7 +38,7 @@ public static class SqliteSchema
     ///   can serve multi-root targets.</description></item>
     /// </list>
     /// </remarks>
-    public const int Version = 3;
+    public const int Version = 4;
 
     /// <summary>
     /// Full DDL executed on a fresh <c>index.db</c>.
@@ -62,6 +63,16 @@ public static class SqliteSchema
             indexed_at      INTEGER NOT NULL,
             UNIQUE(root_id, relative_path)
         );
+
+        CREATE TABLE file_skips (
+            logical_path TEXT PRIMARY KEY,
+            reason       TEXT NOT NULL,
+            size_bytes   INTEGER,
+            detail       TEXT,
+            observed_at  INTEGER NOT NULL
+        );
+
+        CREATE INDEX file_skips_reason_idx ON file_skips(reason);
 
         CREATE VIRTUAL TABLE code_fts USING fts5(
             content,

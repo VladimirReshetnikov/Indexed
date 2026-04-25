@@ -1,7 +1,8 @@
 # Indexed — Architecture
 
 - Created (UTC): 2026-04-15T17:00:00Z
-- Repository HEAD: cd463ca87356b067e49fe274a1ebcb6e92376c1d
+- Updated (UTC): 2026-04-25T20:12:31Z
+- Repository HEAD: 8d573b569cd63e77dea836599ba58819022d3074
 - Status: Current-state architecture for the Indexed full-text search service. Covers Stages 0–5 as implemented, including prose extraction and truthful `auto` mode.
 
 ## 1. System overview
@@ -124,7 +125,7 @@ Each served target gets a stable identifier:
 - **Legacy git-default compatibility case**: `repoId = SHA1( absolutePath(repoRoot) + "\0" + firstCommitSha )[0:12]`
 - **All other targets**: `targetId = SHA1(canonical-target-spec-byte-stream)[0:12]`
 
-The target-spec byte stream encodes target kind, normalized roots, exclude settings, and the directory-default switch. State lives under:
+The target-spec byte stream encodes target kind, normalized roots, include/exclude settings, file-size cap, and the directory-default switch. State lives under:
 
 ```
 %LOCALAPPDATA%\Indexed\<targetId>\
@@ -135,7 +136,7 @@ The target-spec byte stream encodes target kind, normalized roots, exclude setti
 
 For compatibility, git-default targets expose both `targetId` and `repoId`, and they are equal.
 
-### 3.2 SQLite schema (version 3)
+### 3.2 SQLite schema (version 4)
 
 One database per target. WAL journal mode for concurrent reads during writes.
 
@@ -159,6 +160,16 @@ CREATE TABLE files (
     indexed_at     INTEGER NOT NULL,
     UNIQUE(root_id, relative_path)
 );
+
+CREATE TABLE file_skips (
+    logical_path TEXT PRIMARY KEY,
+    reason       TEXT NOT NULL,
+    size_bytes   INTEGER,
+    detail       TEXT,
+    observed_at  INTEGER NOT NULL
+);
+
+CREATE INDEX file_skips_reason_idx ON file_skips(reason);
 
 CREATE VIRTUAL TABLE code_fts USING fts5(
     content,
@@ -186,7 +197,7 @@ Meta keys:
 
 | Key | Value |
 |-----|-------|
-| `schema_version` | `"3"` |
+| `schema_version` | `"4"` |
 | `target_id` | 12-hex-char target identifier |
 | `repo_id` | 12-hex-char repository identifier when the target is a compatible git default |
 | `indexed_head` | Git HEAD SHA of the last fully indexed revision (git targets only) |
@@ -202,6 +213,7 @@ Schema version history:
 | 1 | Initial: `code_fts` stored full content. | — |
 | 2 | `code_fts` becomes contentless (`content = ''`, `contentless_delete = 1`). | Cuts index size by ~source tree size. Requires SQLite 3.43+ for `contentless_delete`. Snippets come from disk at query time. |
 | 3 | Add `roots`, replace path-only `files` identity with `root_id + relative_path + logical_path`. | Enables directory-tree and directory-set targets while preserving the git logical-path namespace. |
+| 4 | Add `file_skips` non-indexable telemetry and target-level include/cap settings. | Makes large/binary/unreadable omissions visible through `/status` and gives directory targets precise source-only indexes. |
 
 ### 3.3 File set
 
@@ -213,12 +225,18 @@ The indexed file set depends on target kind:
 
 Including untracked-but-not-ignored git files ensures that new files written by an agent are searchable before they are committed. Directory targets do not depend on git at all.
 
-A file is excluded from indexing if any of:
+A file is outside the indexed set if it does not match the optional include
+glob list, matches the effective exclude glob list, or is non-indexable.
+Non-indexable files are recorded in `file_skips`; include/exclude-filtered
+files are intentionally omitted without telemetry so focused indexes do not
+fill the skip table with out-of-scope files.
 
-1. Size exceeds 50 MiB (`MaxIndexableFileBytes`).
+A file is non-indexable if any of:
+
+1. Size exceeds the target's configured cap (`MaxIndexableFileBytes`, default 50 MiB).
 2. First 8 KiB contains a NUL byte (shared binary heuristic).
 3. `git check-attr binary` reports `binary: set` (git targets only).
-4. Logical path matches the daemon's exclude glob list.
+4. The file is missing, unreadable, or a directory by the time the indexer tries to read it.
 
 Exclude globs are composed at daemon startup from up to three sources:
 
@@ -226,24 +244,32 @@ Exclude globs are composed at daemon startup from up to three sources:
 - **Built-in directory-mode safety/perf list** (`ExcludeFilter.DefaultDirectoryModeExcludes`, enabled for directory targets unless `--no-default-directory-excludes`): VCS metadata, dependency caches, IDE state, common build outputs, and platform noise.
 - **User-supplied globs** via `--exclude-index <glob>` (repeatable).
 
-The lists are concatenated and applied uniformly by the full-scan indexer, the incremental indexer, and `DirectoryWatcher`, so a newly created excluded file is ignored at every entry point.
+Include globs come only from user-supplied `--include-index <glob>` flags. All
+include/exclude and file-size-cap settings participate in `TargetSpec` identity,
+so two daemon instances serving the same root with different index-shaping
+settings use different `%LOCALAPPDATA%\Indexed\<targetId>\` directories.
+
+The include/exclude policy is applied uniformly by the full-scan indexer, the
+incremental indexer, and `DirectoryWatcher`, so a newly created out-of-scope file
+is ignored at every entry point.
 
 ## 4. Indexing pipeline
 
 ### 4.1 Full scan (startup)
 
-`FullScanIndexer` runs on first startup when the index is empty:
+`FullScanIndexer` runs in the background on first startup when the index is empty:
 
 1. Enumerate files via `IIndexTarget.EnumerateFilesAsync()`.
 2. If the target exposes explicit binary overrides (git mode via `.gitattributes`), batch them before content reads.
-3. For each non-binary, non-excluded file:
+3. For each included, non-excluded, non-binary file:
    - Resolve `root_id`, `relative_path`, and `logical_path`.
    - Compute SHA-256; skip if unchanged from `files.sha256`.
    - Read bytes; decode via `TextDecoder` (BOM-aware: UTF-32 LE/BE, UTF-16 LE/BE, UTF-8 BOM, UTF-8 fallback).
    - Run the extension-mapped extraction pipeline (XML docs, line comments, block comments, Markdown, plain text).
    - UPSERT into `files` + `code_fts`, then replace that file's `prose_fts` rows within the same transaction.
-4. Batch size: 200 files or 250 ms per transaction.
-5. On completion, write `indexed_head` / revision token (when present) and `last_full_scan_at` to `meta`.
+4. For each non-indexable in-scope file, delete any stale `files` row and upsert a `file_skips` row with reason, optional size/detail, and observation timestamp.
+5. Batch size: 200 files or 250 ms per transaction.
+6. On completion, write `indexed_head` / revision token (when present) and `last_full_scan_at` to `meta`.
 
 ### 4.2 Incremental indexer (background worker)
 
@@ -266,7 +292,7 @@ Transaction model: deletes and upserts each run in their own `WriterScope`. If a
 
 - Recursive, 64 KB internal buffer.
 - One watcher per target root.
-- Excludes configured globs and, for directory targets, the built-in directory-mode defaults.
+- Applies the same include/exclude policy used by full scans and incremental indexing.
 - Normalizes paths to logical POSIX paths (forward slashes).
 - Rename events emit `FileDeleted(oldPath)` + `FileChanged(newPath)`.
 - On FSW error (buffer overflow), enqueues `ReconciliationRequested` as fallback.
@@ -351,18 +377,17 @@ The FTS5 posting list is a *candidate oracle*, not the source of truth for match
 3. **Resolve paths**: `%LOCALAPPDATA%\Indexed\<targetId>\{daemon.json, index.db, logs/}`. The local (non-roaming) application data folder is used because `index.db` is a machine-specific, reconstructible-from-source derived artifact that must not replicate across devices.
 4. **Acquire mutex**: `Global\Indexed-<targetId>` named mutex (Windows). Handles `AbandonedMutexException` from crashed predecessors.
 5. **Bind listener**: `TcpListener` on `127.0.0.1:0` for OS-assigned ephemeral port; transfer to `HttpListener`.
-6. **Open index**: `SqliteIndex.OpenOrCreate(index.db)`. On corruption or schema mismatch: delete and recreate.
-7. **Construct the content provider**: `FileContentProvider` rooted at the selected target. Contentless FTS5 means the search backend rehydrates match text from disk, not from the index.
-8. **Start incremental pipeline**:
+6. **Write `daemon.json` and start idle timer**: atomic temp-file + rename advertises the bound port, PID, target info, repo compatibility metadata (if any), and shutdown token before long indexing work begins.
+7. **Open index**: `SqliteIndex.OpenOrCreate(index.db)`. On corruption or schema mismatch: delete and recreate.
+8. **Construct the content provider**: `FileContentProvider` rooted at the selected target and configured with the target's file-size cap. Contentless FTS5 means the search backend rehydrates match text from disk, not from the index.
+9. **Start incremental pipeline**:
    - `DebouncingEventQueue` (event broker; also receives repair events from the query executor)
    - `IncrementalIndexer` (background worker)
    - `DirectoryWatcher` (armed before the initial scan)
    - optional `HeadPoller` (git targets only)
    - `ReconciliationScheduler` (5-minute timer)
-9. **Full scan** (if index empty): run `FullScanIndexer`.
 10. **Start the background optimizer** (`IndexOptimizer`): a 15-minute timer (configurable via `DaemonOptions.OptimizerInterval`) that runs bounded FTS5 segment merges. Each tick calls `SqliteIndex.RunFts5MergeAsync(pageBudget)` (default 512 pages) — enough to reclaim fragmentation from recent batch commits without stalling the writer. Skipped entirely when the writer has been idle since the previous tick.
-11. **Write `daemon.json`**: atomic temp-file + rename. Contains port, PID, target info, repo compatibility metadata (if any), and shutdown token.
-12. **Start idle-exit timer**: fires callback after 30 minutes of no activity.
+11. **Schedule full scan** (if index empty): run `FullScanIndexer` on a background task. `/status` is available immediately and reports `freshness.isStale=true` plus `index.initialScanInProgress=true` until the scan completes.
 
 ### 6.2 Request loop
 
@@ -370,7 +395,7 @@ HTTP dispatch on `127.0.0.1:<port>`:
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/status` | GET | Health check: daemon version, schema version, PID, freshness |
+| `/status` | GET | Health check: daemon version, schema version, PID, freshness, index settings, and skip telemetry |
 | `/search` | POST | Query execution (JSON body: `SearchRequest`) |
 | `/rescan` | POST | Enqueue `ReconciliationRequested` event |
 | `/shutdown` | POST | Authenticated graceful shutdown (`X-Indexed-Shutdown-Token` header) |
@@ -387,7 +412,7 @@ Every `/search` response includes a `freshness` block:
 }
 ```
 
-Staleness rule: `isStale = (pendingFileCount > 0) || (indexedHead != currentHead)`.
+Staleness rule: `isStale = initialScanInProgress || initialScanError || pendingFileCount > 0 || inFlightBatch || (indexedHead != currentHead for revision-tracked targets)`.
 
 ### 6.3 Shutdown sequence
 

@@ -321,6 +321,12 @@ public sealed class DaemonHostIntegrationTests : IDisposable
                 Timeout = TimeSpan.FromSeconds(10),
             };
 
+            await WaitForAsync(async () =>
+            {
+                var status = await http.GetFromJsonAsync("status", IndexedJsonContext.Default.StatusResponse);
+                return status?.Freshness.IsStale == false;
+            });
+
             using var resp = await http.PostAsJsonAsync(
                 "search",
                 new SearchRequest("needle", Mode: QueryMode.Code),
@@ -375,6 +381,12 @@ public sealed class DaemonHostIntegrationTests : IDisposable
                 BaseAddress = new Uri($"http://127.0.0.1:{host.Info.Port}/"),
                 Timeout = TimeSpan.FromSeconds(10),
             };
+
+            await WaitForAsync(async () =>
+            {
+                var status = await http.GetFromJsonAsync("status", IndexedJsonContext.Default.StatusResponse);
+                return status?.Freshness.IsStale == false;
+            });
 
             using (var proseResp = await http.PostAsJsonAsync(
                 "search",
@@ -504,6 +516,12 @@ public sealed class DaemonHostIntegrationTests : IDisposable
                 BaseAddress = new Uri($"http://127.0.0.1:{host.Info.Port}/"),
                 Timeout = TimeSpan.FromSeconds(10),
             };
+
+            await WaitForAsync(async () =>
+            {
+                var status = await http.GetFromJsonAsync("status", IndexedJsonContext.Default.StatusResponse);
+                return status?.Freshness.IsStale == false;
+            });
 
             using var resp = await http.PostAsJsonAsync(
                 "search",

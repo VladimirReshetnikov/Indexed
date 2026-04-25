@@ -28,13 +28,17 @@ public sealed class DirectoryTreeIndexTarget : IIndexTarget
         string root,
         IReadOnlyList<string>? indexExcludeGlobs = null,
         bool useDefaultIndexExcludes = true,
-        bool useDefaultDirectoryExcludes = true)
+        bool useDefaultDirectoryExcludes = true,
+        IReadOnlyList<string>? indexIncludeGlobs = null,
+        long maxIndexableFileBytes = TargetIndexDefaults.DefaultMaxIndexableFileBytes)
     {
         var spec = TargetSpecFactory.CreateDirectoryTree(
             root,
             indexExcludeGlobs,
             useDefaultIndexExcludes,
-            useDefaultDirectoryExcludes);
+            useDefaultDirectoryExcludes,
+            indexIncludeGlobs,
+            maxIndexableFileBytes);
         return new DirectoryTreeIndexTarget(
             spec,
             Indexed.Targets.TargetId.Compute(spec),

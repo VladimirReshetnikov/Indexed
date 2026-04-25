@@ -23,9 +23,11 @@ public readonly record struct EnumeratedFile(
 public sealed record TargetSpec(
     TargetKind Kind,
     IReadOnlyList<TargetRootSpec> Roots,
+    IReadOnlyList<string>? IndexIncludeGlobs,
     IReadOnlyList<string>? IndexExcludeGlobs,
     bool UseDefaultIndexExcludes,
-    bool UseDefaultDirectoryExcludes);
+    bool UseDefaultDirectoryExcludes,
+    long MaxIndexableFileBytes);
 
 public interface IIndexTarget
 {

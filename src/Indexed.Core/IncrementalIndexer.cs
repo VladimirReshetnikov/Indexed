@@ -41,7 +41,8 @@ public sealed class IncrementalIndexer : IAsyncDisposable
     private readonly SqliteIndex _index;
     private readonly DebouncingEventQueue _queue;
     private readonly ILogger _logger;
-    private readonly ExcludeFilter _excludeFilter;
+    private readonly IndexingOptions _options;
+    private readonly IndexPathFilter _pathFilter;
     private readonly ExtractorRegistry _extractorRegistry;
     private readonly IRevisionDiffTarget? _revisionDiffTarget;
     private readonly IExplicitBinaryPathProvider? _explicitBinaryPathProvider;
@@ -103,12 +104,24 @@ public sealed class IncrementalIndexer : IAsyncDisposable
         IReadOnlyList<string>? excludeGlobs = null,
         ILogger? logger = null,
         ExtractorRegistry? extractorRegistry = null)
+        : this(target, index, queue, new IndexingOptions(excludeGlobs: excludeGlobs), logger, extractorRegistry)
+    {
+    }
+
+    public IncrementalIndexer(
+        IIndexTarget target,
+        SqliteIndex index,
+        DebouncingEventQueue queue,
+        IndexingOptions options,
+        ILogger? logger = null,
+        ExtractorRegistry? extractorRegistry = null)
     {
         _target = target ?? throw new ArgumentNullException(nameof(target));
         _index = index ?? throw new ArgumentNullException(nameof(index));
         _queue = queue ?? throw new ArgumentNullException(nameof(queue));
+        _options = options ?? throw new ArgumentNullException(nameof(options));
         _logger = logger ?? NullLogger.Instance;
-        _excludeFilter = new ExcludeFilter(excludeGlobs);
+        _pathFilter = new IndexPathFilter(_options);
         _extractorRegistry = extractorRegistry ?? ExtractorRegistry.BuildDefault();
         _revisionDiffTarget = target as IRevisionDiffTarget;
         _explicitBinaryPathProvider = target as IExplicitBinaryPathProvider;
@@ -236,8 +249,10 @@ public sealed class IncrementalIndexer : IAsyncDisposable
                     break;
 
                 case FileChanged fc:
-                    if (!_excludeFilter.IsExcluded(fc.LogicalPath))
+                    if (_pathFilter.ShouldIndex(fc.LogicalPath))
                         toUpsert.Add(fc.LogicalPath);
+                    else
+                        toDelete.Add(fc.LogicalPath);
                     break;
 
                 case FileDeleted fd:
@@ -256,6 +271,7 @@ public sealed class IncrementalIndexer : IAsyncDisposable
                 {
                     var id = _index.LookupFileIdByLogicalPath(logicalPath);
                     if (id.HasValue) deletedIds.Add(id.Value);
+                    else SqliteIndex.DeleteFileSkipByLogicalPath(scope, logicalPath);
                 }
 
                 if (deletedIds.Count > 0)
@@ -285,7 +301,7 @@ public sealed class IncrementalIndexer : IAsyncDisposable
                 {
                     ct.ThrowIfCancellationRequested();
 
-                    if (_excludeFilter.IsExcluded(logicalPath))
+                    if (!_pathFilter.ShouldIndex(logicalPath))
                     {
                         skipped++;
                         continue;
@@ -294,12 +310,23 @@ public sealed class IncrementalIndexer : IAsyncDisposable
                     if (!_target.TryResolveLogicalPath(new LogicalPath(logicalPath), out var file))
                     {
                         _logger.LogDebug("skip {Path}: target could not resolve logical path", logicalPath);
+                        SqliteIndex.DeleteIndexedFileByLogicalPath(scope, logicalPath);
+                        SqliteIndex.DeleteFileSkipByLogicalPath(scope, logicalPath);
                         skipped++;
                         continue;
                     }
 
-                    if (IsBinary(logicalPath, file.AbsolutePath))
+                    if (Volatile.Read(ref _explicitBinaryLogicalPaths).Contains(logicalPath))
                     {
+                        RecordSkip(scope, logicalPath, IndexSkipReason.ExplicitBinary, TryGetFileSize(file.AbsolutePath), null);
+                        skipped++;
+                        continue;
+                    }
+
+                    var classification = BinaryFileClassifier.Classify(file.AbsolutePath, _options.MaxIndexableFileBytes);
+                    if (classification.Status != FileIndexabilityStatus.Text)
+                    {
+                        RecordSkip(scope, logicalPath, ToSkipReason(classification.Status), classification.SizeBytes, classification.Detail);
                         skipped++;
                         continue;
                     }
@@ -309,8 +336,20 @@ public sealed class IncrementalIndexer : IAsyncDisposable
                     try
                     {
                         var info = new FileInfo(file.AbsolutePath);
-                        if (!info.Exists) { skipped++; continue; }
-                        if (info.Length > IndexLimits.MaxIndexableFileBytes) { skipped++; continue; }
+                        if (!info.Exists)
+                        {
+                            SqliteIndex.DeleteIndexedFileByLogicalPath(scope, logicalPath);
+                            SqliteIndex.DeleteFileSkipByLogicalPath(scope, logicalPath);
+                            skipped++;
+                            continue;
+                        }
+
+                        if (info.Length > _options.MaxIndexableFileBytes)
+                        {
+                            RecordSkip(scope, logicalPath, IndexSkipReason.TooLarge, info.Length, $"size {info.Length} bytes exceeds cap {_options.MaxIndexableFileBytes} bytes");
+                            skipped++;
+                            continue;
+                        }
                         mtimeUtc = new DateTimeOffset(info.LastWriteTimeUtc, TimeSpan.Zero).ToUnixTimeSeconds();
 
                         using (var shaStream = new FileStream(file.AbsolutePath, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize: 4096, useAsync: true))
@@ -321,12 +360,14 @@ public sealed class IncrementalIndexer : IAsyncDisposable
                     catch (IOException ex)
                     {
                         _logger.LogDebug(ex, "skip {Path}: {Message}", logicalPath, ex.Message);
+                        RecordSkip(scope, logicalPath, IndexSkipReason.Unreadable, null, ex.Message);
                         skipped++;
                         continue;
                     }
                     catch (UnauthorizedAccessException ex)
                     {
                         _logger.LogDebug(ex, "skip {Path}: {Message}", logicalPath, ex.Message);
+                        RecordSkip(scope, logicalPath, IndexSkipReason.Unreadable, null, ex.Message);
                         skipped++;
                         continue;
                     }
@@ -342,9 +383,10 @@ public sealed class IncrementalIndexer : IAsyncDisposable
                     try
                     {
                         bytes = await File.ReadAllBytesAsync(file.AbsolutePath, ct).ConfigureAwait(false);
-                        if (bytes.LongLength > IndexLimits.MaxIndexableFileBytes)
+                        if (bytes.LongLength > _options.MaxIndexableFileBytes)
                         {
                             _logger.LogDebug("skip {Path}: grew past size cap after read ({Size} bytes)", logicalPath, bytes.LongLength);
+                            RecordSkip(scope, logicalPath, IndexSkipReason.TooLarge, bytes.LongLength, $"size {bytes.LongLength} bytes exceeds cap {_options.MaxIndexableFileBytes} bytes after read");
                             skipped++;
                             continue;
                         }
@@ -352,12 +394,14 @@ public sealed class IncrementalIndexer : IAsyncDisposable
                     catch (IOException ex)
                     {
                         _logger.LogDebug(ex, "skip {Path}: {Message}", logicalPath, ex.Message);
+                        RecordSkip(scope, logicalPath, IndexSkipReason.Unreadable, null, ex.Message);
                         skipped++;
                         continue;
                     }
                     catch (UnauthorizedAccessException ex)
                     {
                         _logger.LogDebug(ex, "skip {Path}: {Message}", logicalPath, ex.Message);
+                        RecordSkip(scope, logicalPath, IndexSkipReason.Unreadable, null, ex.Message);
                         skipped++;
                         continue;
                     }
@@ -457,7 +501,8 @@ public sealed class IncrementalIndexer : IAsyncDisposable
         await foreach (var file in _target.EnumerateFilesAsync(ct).ConfigureAwait(false))
         {
             targetFiles.Add(file);
-            livePaths.Add(file.LogicalPath.Value);
+            if (_pathFilter.ShouldIndex(file.LogicalPath.Value))
+                livePaths.Add(file.LogicalPath.Value);
         }
 
         await RefreshExplicitBinaryLogicalPathsAsync(targetFiles, ct).ConfigureAwait(false);
@@ -485,6 +530,7 @@ public sealed class IncrementalIndexer : IAsyncDisposable
             foreach (var file in targetFiles)
             {
                 var logicalPath = file.LogicalPath.Value;
+                if (!_pathFilter.ShouldIndex(logicalPath)) continue;
                 if (!stats.TryGetValue(logicalPath, out var stat)) continue;
 
                 try
@@ -578,10 +624,37 @@ public sealed class IncrementalIndexer : IAsyncDisposable
         throw new InvalidOperationException($"no root id mapping exists for '{root.AbsolutePath}'");
     }
 
-    private bool IsBinary(string logicalPath, string absolutePath)
+    private void RecordSkip(WriterScope scope, string logicalPath, string reason, long? sizeBytes, string? detail)
     {
-        if (Volatile.Read(ref _explicitBinaryLogicalPaths).Contains(logicalPath))
-            return true;
-        return BinaryFileClassifier.IsLikelyBinary(absolutePath);
+        SqliteIndex.DeleteIndexedFileByLogicalPath(scope, logicalPath);
+        SqliteIndex.RecordFileSkip(
+            scope,
+            logicalPath,
+            reason,
+            sizeBytes,
+            detail,
+            DateTimeOffset.UtcNow.ToUnixTimeSeconds());
     }
+
+    private static long? TryGetFileSize(string absolutePath)
+    {
+        try
+        {
+            var info = new FileInfo(absolutePath);
+            return info.Exists ? info.Length : null;
+        }
+        catch (IOException) { return null; }
+        catch (UnauthorizedAccessException) { return null; }
+    }
+
+    private static string ToSkipReason(FileIndexabilityStatus status) => status switch
+    {
+        FileIndexabilityStatus.Missing => IndexSkipReason.Missing,
+        FileIndexabilityStatus.Directory => IndexSkipReason.Directory,
+        FileIndexabilityStatus.Oversize => IndexSkipReason.TooLarge,
+        FileIndexabilityStatus.Binary => IndexSkipReason.Binary,
+        FileIndexabilityStatus.Unreadable => IndexSkipReason.Unreadable,
+        FileIndexabilityStatus.Text => throw new ArgumentOutOfRangeException(nameof(status)),
+        _ => throw new ArgumentOutOfRangeException(nameof(status), status, "unknown indexability status"),
+    };
 }

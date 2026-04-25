@@ -86,6 +86,17 @@ public sealed record DaemonOptions
     public IReadOnlyList<string>? IndexExcludeGlobs { get; init; }
 
     /// <summary>
+    /// Optional gitignore-style include globs applied before excludes during
+    /// indexing. When null or empty, every target file is in scope.
+    /// </summary>
+    public IReadOnlyList<string>? IndexIncludeGlobs { get; init; }
+
+    /// <summary>
+    /// Maximum file size accepted into the raw-content index.
+    /// </summary>
+    public long MaxIndexableFileBytes { get; init; } = Indexed.Targets.TargetIndexDefaults.DefaultMaxIndexableFileBytes;
+
+    /// <summary>
     /// When <c>true</c> (default), the daemon prepends
     /// <see cref="Indexed.Core.ExcludeFilter.DefaultBinaryAdjacentGlobs"/> to
     /// <see cref="IndexExcludeGlobs"/> before passing the combined list to the

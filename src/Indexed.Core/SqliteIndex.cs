@@ -363,6 +363,65 @@ public sealed class SqliteIndex : IAsyncDisposable
         }
     }
 
+    public IndexSkipStats GetSkipStats(int sampleLimit = 20)
+    {
+        ThrowIfDisposed();
+        if (sampleLimit < 0) throw new ArgumentOutOfRangeException(nameof(sampleLimit));
+
+        lock (_syncReaderGate)
+        {
+            long total;
+            using (var totalCmd = _syncReader.CreateCommand())
+            {
+                totalCmd.CommandText = "SELECT COUNT(*) FROM file_skips;";
+                total = (long)(totalCmd.ExecuteScalar() ?? 0L);
+            }
+
+            var byReason = new List<IndexSkipReasonCount>();
+            using (var byReasonCmd = _syncReader.CreateCommand())
+            {
+                byReasonCmd.CommandText = """
+                    SELECT reason, COUNT(*)
+                    FROM file_skips
+                    GROUP BY reason
+                    ORDER BY COUNT(*) DESC, reason;
+                    """;
+                using var reader = byReasonCmd.ExecuteReader();
+                while (reader.Read())
+                {
+                    byReason.Add(new IndexSkipReasonCount(
+                        Reason: reader.GetString(0),
+                        Count: reader.GetInt64(1)));
+                }
+            }
+
+            var samples = new List<IndexSkipSample>();
+            if (sampleLimit > 0)
+            {
+                using var sampleCmd = _syncReader.CreateCommand();
+                sampleCmd.CommandText = """
+                    SELECT logical_path, reason, size_bytes, detail, observed_at
+                    FROM file_skips
+                    ORDER BY observed_at DESC, logical_path
+                    LIMIT $limit;
+                    """;
+                sampleCmd.Parameters.AddWithValue("$limit", sampleLimit);
+                using var reader = sampleCmd.ExecuteReader();
+                while (reader.Read())
+                {
+                    samples.Add(new IndexSkipSample(
+                        LogicalPath: reader.GetString(0),
+                        Reason: reader.GetString(1),
+                        SizeBytes: reader.IsDBNull(2) ? null : reader.GetInt64(2),
+                        Detail: reader.IsDBNull(3) ? null : reader.GetString(3),
+                        ObservedAt: DateTimeOffset.FromUnixTimeSeconds(reader.GetInt64(4))));
+                }
+            }
+
+            return new IndexSkipStats(total, byReason, samples);
+        }
+    }
+
     /// <summary>
     /// Enter an exclusive writer scope. Use <c>await using</c>; the
     /// underlying <see cref="SqliteTransaction"/> is committed on dispose
@@ -449,6 +508,15 @@ public sealed class SqliteIndex : IAsyncDisposable
         if (scope is null) throw new ArgumentNullException(nameof(scope));
         var conn = scope.Connection;
 
+        string? logicalPath = null;
+        using (var lookup = conn.CreateCommand())
+        {
+            lookup.Transaction = scope.Transaction;
+            lookup.CommandText = "SELECT logical_path FROM files WHERE file_id = $id;";
+            lookup.Parameters.AddWithValue("$id", fileId);
+            logicalPath = lookup.ExecuteScalar() as string;
+        }
+
         using (var cmd = conn.CreateCommand())
         {
             cmd.Transaction = scope.Transaction;
@@ -469,6 +537,14 @@ public sealed class SqliteIndex : IAsyncDisposable
             cmd.CommandText = "DELETE FROM files WHERE file_id = $id;";
             cmd.Parameters.AddWithValue("$id", fileId);
             cmd.ExecuteNonQuery();
+        }
+        if (logicalPath is not null)
+        {
+            using var skip = conn.CreateCommand();
+            skip.Transaction = scope.Transaction;
+            skip.CommandText = "DELETE FROM file_skips WHERE logical_path = $p;";
+            skip.Parameters.AddWithValue("$p", logicalPath);
+            skip.ExecuteNonQuery();
         }
     }
 
@@ -538,6 +614,14 @@ public sealed class SqliteIndex : IAsyncDisposable
             fileId = Convert.ToInt64(cmd.ExecuteScalar());
         }
 
+        using (var clearSkip = conn.CreateCommand())
+        {
+            clearSkip.Transaction = scope.Transaction;
+            clearSkip.CommandText = "DELETE FROM file_skips WHERE logical_path = $logicalPath;";
+            clearSkip.Parameters.AddWithValue("$logicalPath", logicalPath);
+            clearSkip.ExecuteNonQuery();
+        }
+
         // Replace the code_fts posting list. The column name "content" below
         // is the FTS5 virtual-table column alias, not a stored value — under
         // the contentless v2 schema (content = '') FTS5 tokenizes the text
@@ -560,6 +644,67 @@ public sealed class SqliteIndex : IAsyncDisposable
         }
 
         return fileId;
+    }
+
+    public static void RecordFileSkip(
+        WriterScope scope,
+        string logicalPath,
+        string reason,
+        long? sizeBytes,
+        string? detail,
+        long observedAt)
+    {
+        if (scope is null) throw new ArgumentNullException(nameof(scope));
+        var conn = scope.Connection;
+        using var cmd = conn.CreateCommand();
+        cmd.Transaction = scope.Transaction;
+        cmd.CommandText = """
+            INSERT INTO file_skips(logical_path, reason, size_bytes, detail, observed_at)
+            VALUES($logicalPath, $reason, $sizeBytes, $detail, $observedAt)
+            ON CONFLICT(logical_path) DO UPDATE SET
+                reason = excluded.reason,
+                size_bytes = excluded.size_bytes,
+                detail = excluded.detail,
+                observed_at = excluded.observed_at;
+            """;
+        cmd.Parameters.AddWithValue("$logicalPath", logicalPath);
+        cmd.Parameters.AddWithValue("$reason", reason);
+        cmd.Parameters.AddWithValue("$sizeBytes", (object?)sizeBytes ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("$detail", (object?)detail ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("$observedAt", observedAt);
+        cmd.ExecuteNonQuery();
+    }
+
+    public static bool DeleteIndexedFileByLogicalPath(WriterScope scope, string logicalPath)
+    {
+        if (scope is null) throw new ArgumentNullException(nameof(scope));
+        var conn = scope.Connection;
+        long? fileId = null;
+        using (var lookup = conn.CreateCommand())
+        {
+            lookup.Transaction = scope.Transaction;
+            lookup.CommandText = "SELECT file_id FROM files WHERE logical_path = $logicalPath;";
+            lookup.Parameters.AddWithValue("$logicalPath", logicalPath);
+            var result = lookup.ExecuteScalar();
+            if (result is not null && result is not DBNull)
+                fileId = Convert.ToInt64(result);
+        }
+
+        if (fileId is null)
+            return false;
+
+        DeleteFile(scope, fileId.Value);
+        return true;
+    }
+
+    public static void DeleteFileSkipByLogicalPath(WriterScope scope, string logicalPath)
+    {
+        if (scope is null) throw new ArgumentNullException(nameof(scope));
+        using var cmd = scope.Connection.CreateCommand();
+        cmd.Transaction = scope.Transaction;
+        cmd.CommandText = "DELETE FROM file_skips WHERE logical_path = $logicalPath;";
+        cmd.Parameters.AddWithValue("$logicalPath", logicalPath);
+        cmd.ExecuteNonQuery();
     }
 
     /// <summary>
@@ -891,6 +1036,7 @@ public sealed class SqliteIndex : IAsyncDisposable
                 cmd.ExecuteNonQuery();
             }
 
+            BindAndExecute($"DELETE FROM file_skips WHERE logical_path IN (SELECT logical_path FROM files WHERE file_id IN ({inClause}));");
             BindAndExecute($"DELETE FROM code_fts WHERE rowid IN ({inClause});");
             BindAndExecute($"DELETE FROM prose_fts WHERE file_id IN ({inClause});");
             BindAndExecute($"DELETE FROM files WHERE file_id IN ({inClause});");
