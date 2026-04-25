@@ -1,8 +1,8 @@
 # Indexed - FAQ
 
 - Created (UTC): 2026-04-25T21:34:59Z
-- Updated (UTC): 2026-04-25T22:44:28Z
-- Repository HEAD: 6b75c7c68d5467d8952993deb0e2161e59058d77
+- Updated (UTC): 2026-04-25T23:10:22Z
+- Repository HEAD: e9a29010947432df3cf2b5f4286366a2e6a8ad25
 
 This document collects short answers to operational questions that tend to
 come up while running Indexed against real local corpora. For complete command
@@ -104,3 +104,77 @@ idx find "SparseArray" --mode auto --timeout-ms 30000
 Prefer narrowing with `--mode code`, `--glob`, `--max-matches`, and
 `--max-matches-per-file` before increasing the timeout; tighter queries keep
 the daemon responsive and usually produce more useful result sets.
+
+## Code And Prose Search
+
+### What is the difference between code indexing and prose indexing?
+
+Code indexing is the raw searchable file surface. Every indexable text file is
+decoded and added to the `code_fts` trigram index, regardless of whether
+Indexed understands the file's programming language. A code match has
+`kind=code`, no enclosing prose span, and its snippet is rehydrated from the
+current file content at query time.
+
+Prose indexing is an extracted human-language overlay. Only files with a
+registered prose extractor contribute spans to `prose_fts`: whole Markdown and
+plain-text documents, XML documentation, grouped line comments, and block
+comments for the languages Indexed currently recognizes. A prose match carries
+its real span kind, such as `markdown`, `plain-text`, `xml-doc`,
+`line-comment-block`, or `block-comment`, plus the extracted span line range.
+
+Use `--mode code` for exact source/corpus searches and regex searches. Use
+`--mode prose` when the intent is documentation/comment search with prose
+ranking and stemming. `--mode auto` searches both surfaces when possible and
+merges the results; regex queries are code-only because the prose surface uses
+FTS5 `MATCH` syntax rather than .NET regular expressions.
+
+### How does Indexed decide what counts as prose?
+
+Prose is extractor-driven, not language-guess-driven.
+
+The default extractor registry currently treats these as whole-file prose:
+
+- Markdown: `.md`, `.markdown`, `.mdown`, `.mkd`.
+- Plain text: `.txt`, `.rst`, `.adoc`.
+
+It also extracts comments from recognized source/document formats:
+
+- C# XML docs and comments from `.cs`.
+- C-family comments from extensions such as `.c`, `.cpp`, `.h`, `.java`,
+  `.js`, `.ts`, `.css`, `.go`, `.rs`, and `.swift`.
+- F# comments from `.fs`, `.fsi`, and `.fsx`.
+- Hash-line comments from `.py`, `.rb`, shell scripts, YAML, and TOML.
+- PowerShell comments from `.ps1`, `.psm1`, and `.psd1`.
+- SQL comments from `.sql`.
+- XML/HTML comments from `.xml`, `.html`, `.xaml`, `.svg`, `.csproj`,
+  `.props`, `.targets`, and `.config`.
+
+Files without a registered prose extractor still go into the code index if
+they are text and pass the size/binary filters.
+
+### How are code and prose defined for `C:\TestData\wolfram`?
+
+The Wolfram corpus is primarily a code corpus. Its Wolfram Language and
+notebook-like files, including `.nb`, `.wl`, `.m`, `.wls`, `.wlt`, and `.mt`,
+are indexed as raw code text. They do not currently have a Wolfram-specific
+prose extractor, so Wolfram comments such as `(* ... *)` and notebook text
+cells are searchable in `--mode code`, but are not separately searchable as
+`--mode prose` spans.
+
+The current manual index for `C:\TestData\wolfram` contains 5,982 indexed files.
+The largest raw-code extension groups are `.nb`, `.m`, `.wl`, `.wls`, `.wlt`,
+and `.mt`. Its prose overlay is much smaller and comes from recognized
+documentation-like files: 51 Markdown spans, 49 plain-text spans, and 2 HTML
+block-comment spans at the time this FAQ entry was written.
+
+Examples:
+
+```powershell
+idx find "RowBox[" --mode code --glob "**/*.nb" --root C:\TestData\wolfram --index-updates manual
+idx find "VerificationTest" --mode code --glob "**/*.{wlt,mt}" --root C:\TestData\wolfram --index-updates manual
+idx find "parser" --mode prose --kind markdown --root C:\TestData\wolfram --index-updates manual
+```
+
+A useful future extension would add a Wolfram prose extractor for `(* ... *)`
+comments in `.wl`, `.m`, `.wls`, `.wlt`, and `.mt`, with a separate
+notebook-aware extractor for text cells if those become useful search targets.
