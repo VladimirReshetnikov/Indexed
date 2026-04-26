@@ -1,12 +1,13 @@
-# Indexed vs ripgrep performance on the Wolfram corpus
+# Indexed, ripgrep, and ugrep performance on the Wolfram corpus
 
 - Created (UTC): 2026-04-26T02:15:57Z
-- Repository HEAD: 61037266f3664b750ab84c6186eced4cd9b12632
+- Updated (UTC): 2026-04-26T02:47:33Z
+- Repository HEAD: f689bb59f208e6f90006ada45344d9da969c4363
 
 ## Scope
 
-This report compares `idx` and `rg` on `C:\TestData\wolfram`, using the current
-manual Indexed target:
+This report compares `idx`, `rg`, and `ugrep`/`ug` on `C:\TestData\wolfram`,
+using the current manual Indexed target:
 
 ```text
 idx status --root C:\TestData\wolfram --index-updates manual
@@ -21,12 +22,14 @@ Environment summary:
   7,347,920,896 bytes.
 - Corpus tree size: 8,822 files, 8,062,544,856 bytes.
 - ripgrep: `ripgrep 15.0.0 (rev 3a612f88b8)`.
+- ugrep: `ugrep 7.7.0 WIN64 +avx2; -P:pcre2jit;
+  -z:zlib,bzip2,lzma,lz4,zstd,7z,tar/pax/cpio/zip`.
 
 The measurements include CLI process startup, argument parsing, daemon HTTP
-round-trip for `idx`, and normal `rg` process startup. That is intentional:
-these are the wall-clock costs a user sees from PowerShell. Existing OS file
-cache state was not flushed, so this is a warm-machine comparison rather than a
-cold-boot storage benchmark.
+round-trip for `idx`, and normal `rg`/`ugrep` process startup. That is
+intentional: these are the wall-clock costs a user sees from PowerShell.
+Existing OS file cache state was not flushed, so this is a warm-machine
+comparison rather than a cold-boot storage benchmark.
 
 ## Method
 
@@ -39,9 +42,20 @@ main top-k/search-path comparison unless noted otherwise. `rg` commands used:
 rg --no-ignore --hidden --color never --no-heading --count-matches ...
 ```
 
+`ugrep` commands used:
+
+```powershell
+ugrep -r -. -I --color=never -o -c '-m1,' ...
+```
+
+For fixed-string scenarios, `-F` was added. For glob-limited scenarios, `-g`
+was added. The quoted `'-m1,'` matters in PowerShell: it suppresses zero-count
+lines while preserving count output, making `ugrep` comparable to
+`rg --count-matches`.
+
 This deliberately measures command completion, not time-to-first-streamed-line.
-`rg` can often print early matches before it has scanned the whole tree, but a
-complete `rg --count-matches` command still has to read the selected files.
+`rg` and `ugrep` can often print early matches before they have scanned the
+whole tree, but complete count commands still have to read the selected files.
 Conversely, the main `idx` measurements constrain result materialization to a
 small result set; the large-cap table below separately measures the cost of
 asking Indexed to return thousands of matches.
@@ -56,15 +70,15 @@ figures below.
 
 Median wall-clock times:
 
-| Scenario | idx | rg | Faster | Notes |
-| --- | ---: | ---: | --- | --- |
-| Whole corpus no-match literal: `Needle_Not_Present_20260426` | 833 ms | 5,141 ms | idx 6.2x | Indexed avoids scanning the 8 GB tree. |
-| Whole corpus literal: `SparseArray` | 847 ms | 4,917 ms | idx 5.8x | Broad corpus query with constrained result materialization. |
-| Whole corpus short literal: `If` | 513 ms | 4,902 ms | idx 9.6x | Top-k path only; high result caps are much slower. |
-| Notebook literal: `RowBox[` in `**/*.nb` | 676 ms | 4,815 ms | idx 7.1x | Isolated run after removing timeout interference. |
-| Notebook regex: `(RowBox\|TemplateBox\|GraphicsBox)\[` in `**/*.nb` | 769 ms | 6,481 ms | idx 8.4x | Indexed regex trigram prefilter is effective here. |
-| Test files: `VerificationTest` in `**/*.{wlt,mt}` | 674 ms | 160 ms | rg 4.2x | Narrow glob over small files favors native linear scan. |
-| Markdown prose: `parser` in Markdown | 624 ms | 151 ms | rg 4.1x | Indexed service work is tiny; CLI startup dominates. |
+| Scenario | idx | rg | ug | Winner | Notes |
+| --- | ---: | ---: | ---: | --- | --- |
+| Whole corpus no-match literal: `Needle_Not_Present_20260426` | 833 ms | 5,141 ms | 2,789 ms | idx | `ug` halves `rg`, but Indexed avoids scanning the 8 GB tree. |
+| Whole corpus literal: `SparseArray` | 847 ms | 4,917 ms | 3,062 ms | idx | `ug` is a better scanner than `rg` here, still 3.6x slower than `idx`. |
+| Whole corpus short literal: `If` | 513 ms | 4,902 ms | 2,881 ms | idx | Top-k path only; high result caps are much slower. |
+| Notebook literal: `RowBox[` in `**/*.nb` | 676 ms | 4,815 ms | 2,739 ms | idx | Isolated `idx`/`rg` run after removing timeout interference. |
+| Notebook regex: `(RowBox\|TemplateBox\|GraphicsBox)\[` in `**/*.nb` | 769 ms | 6,481 ms | 2,574 ms | idx | `ug` is strong here, but Indexed's trigram prefilter still wins. |
+| Test files: `VerificationTest` in `**/*.{wlt,mt}` | 674 ms | 160 ms | 352 ms | rg | Narrow glob over small files favors native linear scan. |
+| Markdown prose: `parser` in Markdown | 624 ms | 151 ms | 354 ms | rg | Indexed service work is tiny; CLI startup dominates. |
 
 High result caps change the picture. With `idx --max-matches 5000
 --max-matches-per-file 5000`, daemon-side elapsed times were:
@@ -85,15 +99,22 @@ major cost once the caller asks for thousands of matches.
 ## Interpretation
 
 Indexed wins when the search scope is large. For whole-corpus searches and
-notebook-heavy searches, `idx` is usually 6x to 10x faster than `rg` in the
-measured top-k/count-style scenarios because it queries an FTS index instead of
-rescanning gigabytes of notebook/source text.
+notebook-heavy searches, `idx` is usually 3x to 4x faster than `ugrep` and 6x
+to 10x faster than `rg` in the measured top-k/count-style scenarios because it
+queries an FTS index instead of rescanning gigabytes of notebook/source text.
+
+`ugrep` changes the middle of the game. It is a better whole-tree scanner than
+`rg` on this corpus, cutting broad scan completion times roughly in half and
+making notebook regex scans much less painful. It does not erase the indexed
+search advantage: when `idx` already has a warm manual index and the caller
+wants a bounded result set, `idx` remains materially faster.
 
 `rg` wins when the search scope is already small. The `.wlt`/`.mt` and Markdown
 cases are narrow enough that ripgrep's native startup plus direct scan beats
-the .NET `idx` CLI startup and daemon round-trip. The prose Markdown case is
-especially telling: Indexed's daemon reported only 10 ms for the large-cap
-query, but the user-visible CLI command is still hundreds of milliseconds.
+both `ugrep` and the .NET `idx` CLI startup plus daemon round-trip. The prose
+Markdown case is especially telling: Indexed's daemon reported only 10 ms for
+the large-cap query, but the user-visible CLI command is still hundreds of
+milliseconds.
 
 The `idx` CLI has meaningful fixed overhead. A 10-run process-overhead probe
 measured median wall-clock times of about 1,156 ms for `idx status`, 1,832 ms
@@ -125,6 +146,14 @@ rg --no-ignore --hidden --fixed-strings --glob '**/*.wlt' --glob '**/*.mt' 'Veri
 rg --no-ignore --hidden --ignore-case --fixed-strings --glob '**/*.md' 'parser' C:\TestData\wolfram
 ```
 
+Use `ug`/`ugrep` when you need an unindexed scanner over a large or archive-ish
+tree, especially for notebook-heavy regular expressions:
+
+```powershell
+ugrep -r -. -I --color=never -F -o -c '-m1,' -g '*.nb' 'RowBox[' C:\TestData\wolfram
+ugrep -r -. -I --color=never -o -c '-m1,' -g '*.nb' '(RowBox|TemplateBox|GraphicsBox)\[' C:\TestData\wolfram
+```
+
 Keep `idx` result caps low unless the caller really needs a large export:
 
 ```powershell
@@ -146,3 +175,7 @@ idx find 'If' --mode code --case-sensitive --max-matches 200 --max-matches-per-f
 4. Continue tuning result materialization. Large caps show that reading files
    back, finding line/column positions, building snippets, and serializing
    matches can dominate broad queries after FTS has done its job.
+5. Treat `ugrep` as the preferred fallback scanner for broad unindexed trees.
+   `rg` still has the best showing on the narrowest globs here, but `ugrep`
+   materially reduces the pain of scans that are too broad for ripgrep and not
+   yet indexed by Indexed.
