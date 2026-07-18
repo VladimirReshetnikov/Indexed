@@ -1,12 +1,6 @@
 # Indexed
 
-Background-indexed full-text search service for a local workspace target, aimed primarily at AI coding agents that need millisecond-class code search across a git repository, a standalone directory tree, or an explicit multi-directory workspace. This is the standalone [VladimirReshetnikov/Indexed](https://github.com/VladimirReshetnikov/Indexed) repository.
-
-- Created (UTC): 2026-04-15T17:00:00Z
-- Updated (UTC): 2026-07-18T04:19:31Z
-- Repository HEAD: bd08bb89181bfa0e407563e19f49568c9d56f333
-- Source Tools HEAD: 6fe92779aee212e815c54b4b5b4cc92c40894ef3
-- Status: Active standalone repository.
+Background-indexed full-text search service for a local workspace target, aimed primarily at AI coding agents that need millisecond-class code search across a git repository, a standalone directory tree, or an explicit multi-directory workspace.
 
 ## Project goals
 
@@ -183,12 +177,6 @@ Indexed is an independent standalone repository with its own source, tests, and 
 - Generated `bin/` and `obj/` trees are ignored build outputs and must not be committed.
 - `README.md` is the canonical repository and agent guidance; `AGENTS.md` and `CLAUDE.md` are symbolic links to it.
 - Commit validated, self-contained changes directly to `main`, push them to `origin/main`, and include the repository's required `Co-Authored-By` trailer.
-
-## History and provenance
-
-Indexed was extracted from `src/Indexed/` in [VladimirReshetnikov/Tools](https://github.com/VladimirReshetnikov/Tools) with 42 relevant commits preserved. Making the workspace the repository root rewrote those imported commit IDs; the tag `extraction-2026-07-18` identifies the final history-preserving extraction commit.
-
-Existing documentation predating the extraction records source `Repository HEAD` values from Tools. Resolve those historical hashes against the [Tools repository](https://github.com/VladimirReshetnikov/Tools), not against this repository. The source workspace was extracted from Tools HEAD [`6fe92779aee212e815c54b4b5b4cc92c40894ef3`](https://github.com/VladimirReshetnikov/Tools/tree/6fe92779aee212e815c54b4b5b4cc92c40894ef3).
 
 ## License
 
