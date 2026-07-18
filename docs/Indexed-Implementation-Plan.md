@@ -27,13 +27,13 @@ These apply to every stage. They are listed once here rather than repeated per t
 
 ### Coding style
 
-- Follow the preferences recorded in [`PREFERENCES.md`](../../../PREFERENCES.md) at the repository root, particularly the conventions around single-purpose projects, explicit layer boundaries, and test deduplication.
+- Follow the preferences recorded in [`PREFERENCES.md`](https://github.com/VladimirReshetnikov/Tools/blob/main/PREFERENCES.md) in the source Tools repository, particularly the conventions around single-purpose projects, explicit layer boundaries, and test deduplication.
 - Project namespaces mirror project names: `Indexed.Core` types live under `Indexed.Core.*`, not in a catch-all `Indexed.*` namespace.
 - Internal types stay internal unless a test needs them, in which case use `InternalsVisibleTo` for the matching test project — not `public`.
 
 ### XML doc discipline
 
-- Follow [`XML_DOCUMENTATION_STANDARD.md`](../../../XML_DOCUMENTATION_STANDARD.md) at the repository root.
+- Follow [`XML_DOCUMENTATION_STANDARD.md`](https://github.com/VladimirReshetnikov/Tools/blob/main/XML_DOCUMENTATION_STANDARD.md) in the source Tools repository.
 - Interop-heavy and lifecycle-sensitive APIs get `<example>` blocks. Trivial DTOs and getters do not.
 - Document **meaning** (preconditions, postconditions, failure modes, ordering, ownership) — not the signature.
 - Priority surfaces that must be documented:
@@ -715,7 +715,7 @@ Tracked across all stages; not owned by any one of them.
 
 ### XML documentation campaign
 
-Follow [`XML_DOCUMENTATION_STANDARD.md`](../../../XML_DOCUMENTATION_STANDARD.md). Prioritize:
+Follow [`XML_DOCUMENTATION_STANDARD.md`](https://github.com/VladimirReshetnikov/Tools/blob/main/XML_DOCUMENTATION_STANDARD.md). Prioritize:
 
 1. `Indexed.Abstractions` — all public types (S1).
 2. `Indexed.Core` query planner, indexer, regex-trigram planner — contract-heavy, failure-mode-heavy (S2–S3).

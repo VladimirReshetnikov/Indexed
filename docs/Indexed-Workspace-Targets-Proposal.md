@@ -6,14 +6,14 @@
 - Audience: Maintainers, reviewers, implementers, and agent consumers of `idx` / the localhost JSON API.
 - Scope: Current-state review plus proposed architecture, contracts, storage model, and rollout plan for indexing any directory tree or explicit group of directory trees with continuous background updates.
 - Related code:
-  - `src/Indexed/src/Indexed.Service/DaemonHost.cs`
-  - `src/Indexed/src/Indexed.Git/GitRepository.cs`
-  - `src/Indexed/src/Indexed.Core/FullScanIndexer.cs`
-  - `src/Indexed/src/Indexed.Core/IncrementalIndexer.cs`
-  - `src/Indexed/src/Indexed.Core/RepoWatcher.cs`
-  - `src/Indexed/src/Indexed.Core/HeadPoller.cs`
-  - `src/Indexed/src/Indexed.Core/SqliteIndex.cs`
-  - `src/Indexed/src/Indexed.Cli/DaemonClient.cs`
+  - `src/Indexed.Service/DaemonHost.cs`
+  - `src/Indexed.Git/GitRepository.cs`
+  - `src/Indexed.Core/FullScanIndexer.cs`
+  - `src/Indexed.Core/IncrementalIndexer.cs`
+  - `src/Indexed.Core/RepoWatcher.cs`
+  - `src/Indexed.Core/HeadPoller.cs`
+  - `src/Indexed.Core/SqliteIndex.cs`
+  - `src/Indexed.Cli/DaemonClient.cs`
 - Related docs:
   - [Architecture](./Indexed-Architecture.md)
   - [Usage guide](./Indexed-Usage-Guide.md)
@@ -38,7 +38,7 @@ The new mode is complementary, not replacement-oriented. Git mode remains the pr
 
 ### 1.1 What the current docs promise
 
-The active `src/Indexed` docs are consistent about the intended product shape today:
+The active docs in this repository are consistent about the intended product shape today:
 
 - `README.md`, `Indexed-Architecture.md`, `Indexed-Tutorial.md`, and `Indexed-Usage-Guide.md` all describe Indexed as a service for a single local git repository.
 - The authoritative file set is documented as `git ls-files` plus `git ls-files --others --exclude-standard`.

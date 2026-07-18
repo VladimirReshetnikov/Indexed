@@ -1,10 +1,12 @@
 # Indexed
 
-Background-indexed full-text search service for a local workspace target, aimed primarily at AI coding agents that need millisecond-class code search across a git repository, a standalone directory tree, or an explicit multi-directory workspace.
+Background-indexed full-text search service for a local workspace target, aimed primarily at AI coding agents that need millisecond-class code search across a git repository, a standalone directory tree, or an explicit multi-directory workspace. This is the standalone [VladimirReshetnikov/Indexed](https://github.com/VladimirReshetnikov/Indexed) repository.
 
 - Created (UTC): 2026-04-15T17:00:00Z
-- Updated (UTC): 2026-04-25T22:44:28Z
-- Repository HEAD: 6b75c7c68d5467d8952993deb0e2161e59058d77
+- Updated (UTC): 2026-07-18T04:19:31Z
+- Repository HEAD: bd08bb89181bfa0e407563e19f49568c9d56f333
+- Source Tools HEAD: 6fe92779aee212e815c54b4b5b4cc92c40894ef3
+- Status: Active standalone repository.
 
 ## Project goals
 
@@ -69,45 +71,45 @@ Stages 0 through 5 are implemented and tested. Indexed now ships code search, pr
 ## Layout
 
 ```text
-src/Indexed/
-    Indexed.sln
-    Directory.Build.props
-    README.md
-    docs/
-        Indexed-Architecture.md
-        Indexed-FAQ.md
-        Indexed-Workspace-Targets-Proposal.md
-        Indexed-Tutorial.md
-        Indexed-Usage-Guide.md
-        Indexed-Architecture-Proposal.md
-        Indexed-Implementation-Plan.md
-        Indexed-Index-Size-Reduction-Strategies.md
-        Indexed-Size-Reduction-SafeNearTerm-Plan.md
-        Indexed-Stage4-Incremental-Indexer-Plan.md
-    src/
-        Indexed.Abstractions/    DTOs: SearchRequest, SearchResponse, Freshness, Match, etc.
-        Indexed.Targets/         target identity, directory targets, logical-path rules
-        Indexed.Git/             git.exe wrapper: process runner, repository operations
-        Indexed.Extractors/      Roslyn + regex-based prose extraction pipeline
-        Indexed.Core/            SQLite+FTS5 index, query planner, full/incremental indexers
-        Indexed.Service/         HTTP daemon host, idle-exit, lifecycle management
-        Indexed.Cli/             CLI client (output: idx): argument parsing, daemon launcher
-    tests/
-        Indexed.Abstractions.Tests/
-        Indexed.Extractors.Tests/
-        Indexed.Git.Tests/
-        Indexed.Core.Tests/
-        Indexed.Service.Tests/
-        Indexed.Cli.Tests/
+.
+├── Indexed.sln
+├── Directory.Build.props
+├── global.json
+├── README.md
+├── docs/
+│   ├── Indexed-Architecture.md
+│   ├── Indexed-FAQ.md
+│   ├── Indexed-Workspace-Targets-Proposal.md
+│   ├── Indexed-Tutorial.md
+│   ├── Indexed-Usage-Guide.md
+│   ├── Indexed-Architecture-Proposal.md
+│   ├── Indexed-Implementation-Plan.md
+│   ├── Indexed-Index-Size-Reduction-Strategies.md
+│   ├── Indexed-Size-Reduction-SafeNearTerm-Plan.md
+│   └── Indexed-Stage4-Incremental-Indexer-Plan.md
+├── src/
+│   ├── Indexed.Abstractions/    DTOs: SearchRequest, SearchResponse, Freshness, Match, etc.
+│   ├── Indexed.Targets/         target identity, directory targets, logical-path rules
+│   ├── Indexed.Git/             git.exe wrapper: process runner, repository operations
+│   ├── Indexed.Extractors/      Roslyn + regex-based prose extraction pipeline
+│   ├── Indexed.Core/            SQLite+FTS5 index, query planner, full/incremental indexers
+│   ├── Indexed.Service/         HTTP daemon host, idle-exit, lifecycle management
+│   └── Indexed.Cli/             CLI client (output: idx): argument parsing, daemon launcher
+└── tests/
+    ├── Indexed.Abstractions.Tests/
+    ├── Indexed.Extractors.Tests/
+    ├── Indexed.Git.Tests/
+    ├── Indexed.Core.Tests/
+    ├── Indexed.Service.Tests/
+    └── Indexed.Cli.Tests/
 ```
 
 ## Quick start
 
 ```bash
-# Build and test
-cd src/Indexed
-dotnet build
-dotnet test
+# From the repository root, build and test
+dotnet build Indexed.sln
+dotnet test Indexed.sln
 
 # Run a search (CLI auto-starts the daemon)
 dotnet run --project src/Indexed.Cli -- find "SearchRequest" --glob "src/**/*.cs"
@@ -146,8 +148,7 @@ From inside this repository, `dotnet run` is the simplest path (see Quick start)
 To use Indexed in arbitrary repositories or directory workspaces, publish **both** the CLI and the
 daemon into the same directory and add it to `PATH`:
 
-```bash
-cd src/Indexed
+```powershell
 $dest = "$env:LOCALAPPDATA\\Programs\\Indexed"
 dotnet publish src/Indexed.Cli -c Release -o $dest
 dotnet publish src/Indexed.Service -c Release -o $dest
@@ -172,4 +173,23 @@ you cannot publish side-by-side, set `INDEXED_SERVICE_EXE` to the full path of
 
 ## Workspace boundary
 
-`src/Indexed` is an independent workspace with its own source, tests, and documentation lifecycle. It takes **no dependency on any `Near.*` project**; see the [architecture proposal §6.2](docs/Indexed-Architecture-Proposal.md) for rationale.
+Indexed is an independent standalone repository with its own source, tests, and documentation lifecycle. It takes **no dependency on any `Near.*` project**; see the [architecture proposal §6.2](docs/Indexed-Architecture-Proposal.md) for rationale.
+
+## Development guidance
+
+- Run restore, build, test, and publish commands from the repository root with the real .NET SDK. `global.json` selects the .NET 10 SDK feature band used by the `net10.0-windows` projects.
+- Production projects belong under `src/`, test projects under `tests/`, and current product documentation under `docs/`.
+- Keep layer ownership explicit: target identity in `Indexed.Targets`, git integration in `Indexed.Git`, indexing and query execution in `Indexed.Core`, daemon hosting in `Indexed.Service`, and command-line behavior in `Indexed.Cli`.
+- Generated `bin/` and `obj/` trees are ignored build outputs and must not be committed.
+- `README.md` is the canonical repository and agent guidance; `AGENTS.md` and `CLAUDE.md` are symbolic links to it.
+- Commit validated, self-contained changes directly to `main`, push them to `origin/main`, and include the repository's required `Co-Authored-By` trailer.
+
+## History and provenance
+
+Indexed was extracted from `src/Indexed/` in [VladimirReshetnikov/Tools](https://github.com/VladimirReshetnikov/Tools) with 42 relevant commits preserved. Making the workspace the repository root rewrote those imported commit IDs; the tag `extraction-2026-07-18` identifies the final history-preserving extraction commit.
+
+Existing documentation predating the extraction records source `Repository HEAD` values from Tools. Resolve those historical hashes against the [Tools repository](https://github.com/VladimirReshetnikov/Tools), not against this repository. The source workspace was extracted from Tools HEAD [`6fe92779aee212e815c54b4b5b4cc92c40894ef3`](https://github.com/VladimirReshetnikov/Tools/tree/6fe92779aee212e815c54b4b5b4cc92c40894ef3).
+
+## License
+
+Repository contents are licensed under the MIT No Attribution License (MIT-0), subject to any more specific license found in a subdirectory. See [LICENSE](LICENSE).

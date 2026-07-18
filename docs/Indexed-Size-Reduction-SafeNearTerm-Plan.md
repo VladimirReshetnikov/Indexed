@@ -63,7 +63,7 @@ No optimization PR lands until the baseline exists and is committed.
 - A TypeScript-heavy repo with a `package-lock.json` (size-inflating).
 - A Rust repo with a `Cargo.lock` and a `target/` equivalent already excluded.
 
-**Measurement script** (to be added at `src/Indexed/tools/measure-index-size.ps1`):
+**Measurement script** (to be added at `tools/measure-index-size.ps1`):
 
 ```powershell
 # Run the daemon through initial full-scan, then measure.
@@ -82,7 +82,7 @@ No optimization PR lands until the baseline exists and is committed.
   per-table breakdown (`SELECT name, SUM(pgsize) FROM dbstat GROUP BY name`),
   and the 20-query latency matrix.
 
-Commit this file to `src/Indexed/docs/` before opening PR 1.
+Commit this file to `docs/` before opening PR 1.
 
 ## Workstream A — Default exclude globs (PR 1)
 
@@ -101,7 +101,7 @@ on top; users can opt out of the defaults entirely.
 | `src/Indexed.Service/DaemonHost.cs` | Merge `IndexExcludeGlobs` with defaults before passing to indexers/watchers. |
 | `src/Indexed.Core/FullScanIndexer.cs`, `IncrementalIndexer.cs`, `RepoWatcher.cs` | No signature change — they already consume pre-merged globs. |
 | `src/Indexed.Cli/CliArguments.cs`, `ArgumentParser.cs`, `CliApp.cs`, `DaemonLauncher.cs` | New `--no-default-excludes` flag; default true. |
-| `src/Indexed/docs/Indexed-Usage-Guide.md` | Document defaults and opt-out. |
+| `docs/Indexed-Usage-Guide.md` | Document defaults and opt-out. |
 
 ### Default list
 

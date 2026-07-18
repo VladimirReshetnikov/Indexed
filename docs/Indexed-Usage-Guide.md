@@ -25,10 +25,9 @@ The daemon starts automatically on first CLI use and shuts down after 30 minutes
 
 ### Option A: Run from source (this repo)
 
-From `src/Indexed/`, you can run the CLI via `dotnet run`:
+From the repository root, you can run the CLI via `dotnet run`:
 
 ```bash
-cd src/Indexed
 dotnet run --project src/Indexed.Cli -- status
 dotnet run --project src/Indexed.Cli -- find "SearchRequest" --glob "src/**/*.cs"
 ```
@@ -38,7 +37,6 @@ dotnet run --project src/Indexed.Cli -- find "SearchRequest" --glob "src/**/*.cs
 Build once, then run the built executable directly:
 
 ```bash
-cd src/Indexed
 dotnet build -c Release
 .\src\Indexed.Cli\bin\Release\net10.0-windows\idx.exe status
 ```
@@ -52,8 +50,7 @@ To use Indexed in arbitrary repositories or explicit directory workspaces (not j
 publish **both** the CLI and the daemon into the same directory and add it to
 `PATH`:
 
-```bash
-cd src/Indexed
+```powershell
 $dest = "$env:LOCALAPPDATA\\Programs\\Indexed"
 dotnet publish src/Indexed.Cli -c Release -o $dest
 dotnet publish src/Indexed.Service -c Release -o $dest
@@ -255,8 +252,8 @@ idx status --json
 ```
 daemon v0.1.0 pid=12345 schema=4
 target  GitRepository a1b2c3d4e5f6
-root    C:\Tools2\Tools
-repo    C:\Tools2\Tools
+root    C:\src\project
+repo    C:\src\project
 repoId  a1b2c3d4e5f6
 started 2026-04-15T10:00:00.0000000+00:00
 rev     kind=Git current=abc123def456..., indexed=abc123def456...
@@ -787,14 +784,13 @@ dotnet --version    # should be 10.x
 Build the solution:
 
 ```bash
-cd src/Indexed
-dotnet build -c Release
+dotnet build Indexed.sln -c Release
 ```
 
 Run tests:
 
 ```bash
-dotnet test --nologo -v q
+dotnet test Indexed.sln --nologo -v q
 ```
 
 ## 8. Glob pattern syntax

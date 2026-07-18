@@ -198,7 +198,7 @@ Extraction is dispatched by file extension (with shebang override for extension-
    - Contiguous `SingleLineCommentTrivia` runs → one `line-comment-block` span.
    - `MultiLineCommentTrivia` → one `block-comment` span.
 
-   Roslyn is the v1 baseline for C# because [`XML_DOCUMENTATION_STANDARD.md`](../../../XML_DOCUMENTATION_STANDARD.md) makes XML doc content a first-class concern, and regex cannot cleanly separate tag names from prose.
+   Roslyn is the v1 baseline for C# because [`XML_DOCUMENTATION_STANDARD.md`](https://github.com/VladimirReshetnikov/Tools/blob/main/XML_DOCUMENTATION_STANDARD.md) makes XML doc content a first-class concern, and regex cannot cleanly separate tag names from prose.
 
 2. **Regex extractors** for the broad middle:
    - C-family (`.c`, `.cpp`, `.h`, `.hpp`, `.js`, `.ts`, `.tsx`, `.jsx`, `.go`, `.java`, `.kt`, `.swift`, `.rs`): `//`, `/* */`.
