@@ -1,11 +1,6 @@
-By default, all code and other repository contents are licensed under the MIT No Attribution License (MIT-0) below.
-
-If a subdirectory contains its own `LICENSE` file, that subdirectory-specific license takes precedence for files in that directory tree.
-
----
 MIT No Attribution License
 
-Copyright 2026 Tools Contributors
+Copyright 2026 Indexed Contributors
 
 Permission is hereby granted, free of charge, to any person obtaining a copy of this
 software and associated documentation files (the "Software"), to deal in the Software
