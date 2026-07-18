@@ -180,4 +180,4 @@ Indexed is an independent standalone repository with its own source, tests, and 
 
 ## License
 
-Repository contents are licensed under the MIT No Attribution License (MIT-0), subject to any more specific license found in a subdirectory. See [LICENSE](LICENSE).
+Repository contents are licensed under the MIT No Attribution License (MIT-0). See [LICENSE](LICENSE).
